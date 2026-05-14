@@ -1,0 +1,24 @@
+{
+  "name": "@mini-claude-code/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "myagent": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@mini-claude-code/core": "0.0.0",
+    "@mini-claude-code/tools": "0.0.0"
+  }
+}
