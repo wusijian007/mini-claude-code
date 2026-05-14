@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 import { describe, expect, it, afterEach } from "vitest";
 import {
   addTokenUsage,
@@ -5,6 +7,7 @@ import {
   createStore,
   getBootstrapState,
   initializeBootstrapState,
+  normalizePath,
   resetBootstrapStateForTests,
   updateBootstrapState
 } from "../src/index.js";
@@ -15,21 +18,24 @@ afterEach(() => {
 
 describe("bootstrap state", () => {
   it("initializes a normalized singleton without UI or tool dependencies", () => {
+    const inputCwd = `${process.cwd()}\\Mini-ClaudeCode\\`;
     const state = initializeBootstrapState({
       sessionId: "sess_test",
-      cwd: "D:\\paper\\Mini-ClaudeCode\\",
+      cwd: inputCwd,
       model: "test-model",
       permissionMode: "default"
     });
 
     expect(state).toMatchObject({
       sessionId: "sess_test",
-      cwd: "D:/paper/Mini-ClaudeCode",
+      cwd: normalizePath(resolve(inputCwd)),
       model: "test-model",
       costUsd: 0,
       tokenUsage: { inputTokens: 0, outputTokens: 0 },
       permissionMode: "default"
     });
+    expect(state.cwd).not.toContain("\\");
+    expect(state.cwd.endsWith("/")).toBe(false);
     expect(getBootstrapState()).toEqual(state);
   });
 
