@@ -9,6 +9,18 @@ export const DEFAULT_IDLE_TIMEOUT_MS = 90_000;
 export type ModelUsage = {
   inputTokens?: number;
   outputTokens?: number;
+  /**
+   * Tokens written into Anthropic's prompt cache on this turn (i.e. the
+   * input portion that became a cache entry). Counts only when the
+   * request had at least one `cache_control` marker.
+   */
+  cacheCreationInputTokens?: number;
+  /**
+   * Tokens served from a previously-written prompt cache entry on this
+   * turn. These are billed at a discount and are the main signal that
+   * prompt caching is working.
+   */
+  cacheReadInputTokens?: number;
 };
 
 export type ModelRequest = {

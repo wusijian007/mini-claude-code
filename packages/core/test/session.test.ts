@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,5 +125,40 @@ describe("session transcript store", () => {
     expect(compacted.events.at(-1)).toMatchObject({ type: "compact" });
     expect(estimateMessagesTokens(replayMessagesFromSession(compacted))).toBeLessThan(beforeTokens);
     expect(summarizeSession(compacted)).toContain("compact:");
+  });
+
+  it("loads pre-M1.5a sessions whose tokenUsage is missing cache fields", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-session-legacy-"));
+    const sessionRootDir = join(cwd, ".myagent", "sessions");
+    mkdirSync(sessionRootDir, { recursive: true });
+    const legacy = {
+      version: 1,
+      sessionId: "sess_legacy_fixture",
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      updatedAt: new Date(1_700_000_000_000).toISOString(),
+      bootstrap: {
+        sessionId: "sess_legacy_fixture",
+        cwd: cwd.replace(/\\/g, "/"),
+        model: "claude-old",
+        costUsd: 0.5,
+        tokenUsage: { inputTokens: 100, outputTokens: 50 },
+        permissionMode: "default"
+      },
+      events: []
+    };
+    writeFileSync(
+      join(sessionRootDir, "sess_legacy_fixture.json"),
+      `${JSON.stringify(legacy, null, 2)}\n`,
+      "utf8"
+    );
+
+    const store = createSessionStore(cwd, sessionRootDir);
+    const loaded = await store.load("sess_legacy_fixture");
+    expect(loaded.bootstrap.tokenUsage).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0
+    });
   });
 });

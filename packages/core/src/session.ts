@@ -323,9 +323,19 @@ function messagePreview(message: Message): string {
 }
 
 function normalizeBootstrap(bootstrap: BootstrapState): BootstrapState {
+  const usage = bootstrap.tokenUsage ?? { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
   return {
     ...bootstrap,
-    cwd: normalizePath(resolve(bootstrap.cwd))
+    cwd: normalizePath(resolve(bootstrap.cwd)),
+    // Sessions persisted before M1.5a lack the cache fields. Default
+    // them to 0 on load so the rest of the runtime can treat tokenUsage
+    // as fully populated.
+    tokenUsage: {
+      inputTokens: usage.inputTokens ?? 0,
+      outputTokens: usage.outputTokens ?? 0,
+      cacheCreationInputTokens: usage.cacheCreationInputTokens ?? 0,
+      cacheReadInputTokens: usage.cacheReadInputTokens ?? 0
+    }
   };
 }
 

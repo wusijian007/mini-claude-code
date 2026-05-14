@@ -45,6 +45,18 @@ export type ProfileRecorder = {
 export type CostRates = {
   inputUsdPerMillionTokens?: number;
   outputUsdPerMillionTokens?: number;
+  /**
+   * Per-million-token rate for input tokens that *create* a prompt cache
+   * entry. Anthropic charges these at a small premium over the base
+   * input rate. Defaults to the base input rate when not provided.
+   */
+  cacheWriteUsdPerMillionTokens?: number;
+  /**
+   * Per-million-token rate for input tokens served from a prompt cache
+   * hit. Significantly cheaper than the base input rate; the cache's
+   * raison d'être.
+   */
+  cacheReadUsdPerMillionTokens?: number;
 };
 
 export type ProfileStore = {
@@ -169,9 +181,19 @@ export function estimateUsageCostUsd(usage: ModelUsage | undefined, rates: CostR
     return 0;
   }
 
-  const input = ((usage.inputTokens ?? 0) / 1_000_000) * (rates.inputUsdPerMillionTokens ?? 0);
+  const baseInputRate = rates.inputUsdPerMillionTokens ?? 0;
+  const input = ((usage.inputTokens ?? 0) / 1_000_000) * baseInputRate;
   const output = ((usage.outputTokens ?? 0) / 1_000_000) * (rates.outputUsdPerMillionTokens ?? 0);
-  return roundCost(input + output);
+  // Cache writes default to the base input rate (Anthropic's actual
+  // premium varies by model and is small; users can override via the
+  // `MYAGENT_CACHE_WRITE_USD_PER_MTOK` env var). Cache reads default to
+  // zero unless the user supplies the discounted rate.
+  const cacheWriteRate = rates.cacheWriteUsdPerMillionTokens ?? baseInputRate;
+  const cacheWrite =
+    ((usage.cacheCreationInputTokens ?? 0) / 1_000_000) * cacheWriteRate;
+  const cacheRead =
+    ((usage.cacheReadInputTokens ?? 0) / 1_000_000) * (rates.cacheReadUsdPerMillionTokens ?? 0);
+  return roundCost(input + output + cacheWrite + cacheRead);
 }
 
 export function formatProfileReport(run: ProfileRun, path?: string): string {

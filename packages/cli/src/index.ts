@@ -87,6 +87,7 @@ Usage:
   myagent mcp <list|tools>
   myagent week12 audit
   myagent week18 finalize
+  myagent usage <sessionId>
   myagent profile <startup|list|show>
   myagent task <start-bash|list|read|kill|notify>
   myagent remote <serve|sessions>
@@ -112,6 +113,7 @@ Week 18 scope:
   remote serve generates .myagent/remote/auth.json on first run; clients must send Authorization: Bearer <token>.
   remote writes require client UUIDs for dedupe; metadata supports detach/resume.
   profile startup records fast-path and cold-path checkpoints under .myagent/profiles.
+  usage <sessionId> renders a per-turn token + cost breakdown from the saved transcript.
   week18 finalize runs the final offline smoke suite and writes a portfolio report.
   memory list shows editable long-term memory entries that will be recalled into future turns.
   resume <sessionId> prints a saved transcript, or continues it when a prompt is provided.
@@ -123,6 +125,7 @@ Week 18 scope:
   Set ANTHROPIC_API_KEY before using chat, or place it in .env.
   Override the default model with MYAGENT_MODEL.
   Optional cost estimates use MYAGENT_INPUT_USD_PER_MTOK and MYAGENT_OUTPUT_USD_PER_MTOK.
+  Prompt-cache cost: MYAGENT_CACHE_WRITE_USD_PER_MTOK (cache creation) and MYAGENT_CACHE_READ_USD_PER_MTOK (cache hit).
 
 Not yet implemented:
   richer custom rendering arrives in later weeks.
@@ -165,6 +168,8 @@ export type CliEnvironment = {
   MYAGENT_PERMISSION_MODE?: PermissionMode;
   MYAGENT_INPUT_USD_PER_MTOK?: string;
   MYAGENT_OUTPUT_USD_PER_MTOK?: string;
+  MYAGENT_CACHE_WRITE_USD_PER_MTOK?: string;
+  MYAGENT_CACHE_READ_USD_PER_MTOK?: string;
 };
 
 export type CliDependencies = {
@@ -242,6 +247,10 @@ export async function runCli(
 
   if (argv[0] === "profile") {
     return runProfile(argv.slice(1), stdout, stderr, dependencies);
+  }
+
+  if (argv[0] === "usage") {
+    return runUsage(argv.slice(1), stdout, stderr, dependencies);
   }
 
   if (argv[0] === "task") {
@@ -539,6 +548,116 @@ async function runProfile(
 
   stderr.write("Usage: myagent profile <startup|list|show>\n");
   return 1;
+}
+
+async function runUsage(
+  args: readonly string[],
+  stdout: WritableLike,
+  stderr: WritableLike,
+  dependencies: CliDependencies
+): Promise<number> {
+  const sessionId = args[0];
+  if (!sessionId) {
+    stderr.write("Missing session id. Usage: myagent usage <sessionId>\n");
+    return 1;
+  }
+
+  const cwd = dependencies.cwd ?? process.cwd();
+  const env = dependencies.env ?? loadEnvironment(cwd, process.env);
+  const pricing = pricingFromEnv(env);
+  const store = createSessionStore(cwd, dependencies.sessionRootDir);
+
+  let record;
+  try {
+    record = await store.load(sessionId);
+  } catch (error) {
+    stderr.write(
+      `Could not load session ${sessionId}: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+    return 1;
+  }
+
+  stdout.write(formatSessionUsage(record, pricing));
+  return 0;
+}
+
+type UsageTurn = {
+  index: number;
+  requestId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  costUsd: number;
+};
+
+function formatSessionUsage(
+  record: Awaited<ReturnType<ReturnType<typeof createSessionStore>["load"]>>,
+  pricing: CostRates | undefined
+): string {
+  const turns: UsageTurn[] = [];
+  let turnIndex = 0;
+  for (const event of record.events) {
+    if (event.type !== "assistant_message" || !event.usage) {
+      continue;
+    }
+    turnIndex += 1;
+    turns.push({
+      index: turnIndex,
+      requestId: event.requestId ?? "",
+      inputTokens: event.usage.inputTokens ?? 0,
+      outputTokens: event.usage.outputTokens ?? 0,
+      cacheCreationInputTokens: event.usage.cacheCreationInputTokens ?? 0,
+      cacheReadInputTokens: event.usage.cacheReadInputTokens ?? 0,
+      costUsd: estimateUsageCostUsd(event.usage, pricing)
+    });
+  }
+
+  const totals = turns.reduce(
+    (acc, t) => ({
+      inputTokens: acc.inputTokens + t.inputTokens,
+      outputTokens: acc.outputTokens + t.outputTokens,
+      cacheCreationInputTokens: acc.cacheCreationInputTokens + t.cacheCreationInputTokens,
+      cacheReadInputTokens: acc.cacheReadInputTokens + t.cacheReadInputTokens,
+      costUsd: acc.costUsd + t.costUsd
+    }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+      costUsd: 0
+    }
+  );
+
+  const lines: string[] = [];
+  lines.push(`[usage] ${record.sessionId}`);
+  lines.push(`model: ${record.bootstrap.model}`);
+  lines.push(`turns: ${turns.length}`);
+  if (turns.length === 0) {
+    lines.push("[usage] no assistant turns recorded yet");
+    return `${lines.join("\n")}\n`;
+  }
+
+  const header = `${"#".padStart(3)}  ${"requestId".padEnd(14)}  ${"in".padStart(7)}  ${"out".padStart(7)}  ${"cache_w".padStart(8)}  ${"cache_r".padStart(8)}  ${"cost_usd".padStart(10)}`;
+  lines.push(header);
+  for (const t of turns) {
+    const requestIdPreview = (t.requestId || "-").slice(0, 14);
+    lines.push(
+      `${String(t.index).padStart(3)}  ${requestIdPreview.padEnd(14)}  ${String(t.inputTokens).padStart(7)}  ${String(t.outputTokens).padStart(7)}  ${String(t.cacheCreationInputTokens).padStart(8)}  ${String(t.cacheReadInputTokens).padStart(8)}  ${("$" + t.costUsd.toFixed(4)).padStart(10)}`
+    );
+  }
+  lines.push(
+    `${"total".padStart(3)}  ${" ".padEnd(14)}  ${String(totals.inputTokens).padStart(7)}  ${String(totals.outputTokens).padStart(7)}  ${String(totals.cacheCreationInputTokens).padStart(8)}  ${String(totals.cacheReadInputTokens).padStart(8)}  ${("$" + totals.costUsd.toFixed(4)).padStart(10)}`
+  );
+  const bootstrapCost = record.bootstrap.costUsd ?? 0;
+  lines.push(`bootstrap.costUsd: $${bootstrapCost.toFixed(4)}`);
+  if (!pricing) {
+    lines.push(
+      "(set MYAGENT_INPUT_USD_PER_MTOK / MYAGENT_OUTPUT_USD_PER_MTOK / MYAGENT_CACHE_{WRITE,READ}_USD_PER_MTOK to populate cost columns)"
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function runTask(
@@ -1620,7 +1739,9 @@ function readDotEnv(path: string): CliEnvironment {
       key === "ANTHROPIC_BASE_URL" ||
       key === "MYAGENT_MODEL" ||
       key === "MYAGENT_INPUT_USD_PER_MTOK" ||
-      key === "MYAGENT_OUTPUT_USD_PER_MTOK"
+      key === "MYAGENT_OUTPUT_USD_PER_MTOK" ||
+      key === "MYAGENT_CACHE_WRITE_USD_PER_MTOK" ||
+      key === "MYAGENT_CACHE_READ_USD_PER_MTOK"
     ) {
       env[key] = value;
       continue;
@@ -1709,12 +1830,21 @@ function isPermissionMode(value: string): value is PermissionMode {
 function pricingFromEnv(env: CliEnvironment): CostRates | undefined {
   const inputUsdPerMillionTokens = parseOptionalNumber(env.MYAGENT_INPUT_USD_PER_MTOK);
   const outputUsdPerMillionTokens = parseOptionalNumber(env.MYAGENT_OUTPUT_USD_PER_MTOK);
-  if (inputUsdPerMillionTokens === undefined && outputUsdPerMillionTokens === undefined) {
+  const cacheWriteUsdPerMillionTokens = parseOptionalNumber(env.MYAGENT_CACHE_WRITE_USD_PER_MTOK);
+  const cacheReadUsdPerMillionTokens = parseOptionalNumber(env.MYAGENT_CACHE_READ_USD_PER_MTOK);
+  if (
+    inputUsdPerMillionTokens === undefined &&
+    outputUsdPerMillionTokens === undefined &&
+    cacheWriteUsdPerMillionTokens === undefined &&
+    cacheReadUsdPerMillionTokens === undefined
+  ) {
     return undefined;
   }
   return {
     inputUsdPerMillionTokens,
-    outputUsdPerMillionTokens
+    outputUsdPerMillionTokens,
+    cacheWriteUsdPerMillionTokens,
+    cacheReadUsdPerMillionTokens
   };
 }
 
