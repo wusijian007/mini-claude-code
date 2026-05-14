@@ -80,6 +80,21 @@ export function createTaskStore(cwd: string, rootDir?: string): TaskStore {
   const normalizedRoot = normalizePath(resolve(rootDir ?? join(cwd, ".myagent", "tasks")));
   const recordsDir = normalizePath(join(normalizedRoot, "records"));
   const outputsDir = normalizePath(join(normalizedRoot, "outputs"));
+  const taskLocks = new Map<string, Promise<unknown>>();
+
+  async function withTaskLock<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = taskLocks.get(taskId) ?? Promise.resolve();
+    const next = previous.then(fn, fn);
+    const settled = next.catch(() => undefined);
+    taskLocks.set(taskId, settled);
+    try {
+      return await next;
+    } finally {
+      if (taskLocks.get(taskId) === settled) {
+        taskLocks.delete(taskId);
+      }
+    }
+  }
 
   return {
     rootDir: normalizedRoot,
@@ -116,9 +131,9 @@ export function createTaskStore(cwd: string, rootDir?: string): TaskStore {
       await mkdir(recordsDir, { recursive: true });
       await mkdir(outputsDir, { recursive: true });
       const path = this.pathFor(record.id);
-      const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+      const tempPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
       await writeFile(tempPath, `${JSON.stringify(normalizeTaskRecord(record), null, 2)}\n`, "utf8");
-      await rename(tempPath, path);
+      await renameWithRetry(tempPath, path);
     },
     async list() {
       const names = await readdir(recordsDir).catch(() => []);
@@ -132,10 +147,12 @@ export function createTaskStore(cwd: string, rootDir?: string): TaskStore {
       return records.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     },
     async patch(taskId, updater) {
-      const current = await this.load(taskId);
-      const next = normalizeTaskRecord(updater(current));
-      await this.save(next);
-      return this.load(taskId);
+      return withTaskLock(taskId, async () => {
+        const current = await this.load(taskId);
+        const next = normalizeTaskRecord(updater(current));
+        await this.save(next);
+        return this.load(taskId);
+      });
     },
     async appendOutput(taskId, chunk) {
       const current = await this.load(taskId);
@@ -629,6 +646,28 @@ async function listProjectFiles(root: string, cwd: string): Promise<string[]> {
 
 function firstPathArg(args: string[]): string | undefined {
   return args.find((arg) => !arg.startsWith("-"));
+}
+
+const RENAME_RETRYABLE_CODES = new Set(["EBUSY", "EPERM", "EACCES"]);
+const RENAME_MAX_ATTEMPTS = 6;
+
+// Windows can briefly hold a rename target with EBUSY/EPERM/EACCES when
+// antivirus, the indexer, or another handle has the destination open.
+// Short bounded retry turns those transient failures into success without
+// masking real errors.
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!code || !RENAME_RETRYABLE_CODES.has(code) || attempt >= RENAME_MAX_ATTEMPTS - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
 }
 
 function isBlockedPath(absolutePath: string, cwd: string): boolean {
