@@ -123,15 +123,22 @@ describe("Agent tool", () => {
     expect(result.status).toBe("success");
     expect(result.content).toContain("Started background sub-agent task");
 
-    for (let index = 0; index < 20; index += 1) {
+    const terminalStates = new Set(["completed", "failed", "killed"]);
+    for (let index = 0; index < 100; index += 1) {
       const tasks = await taskStore.list();
-      if (tasks[0]?.state === "completed") {
+      if (tasks[0] && terminalStates.has(tasks[0].state)) {
         break;
       }
-      await delay(10);
+      await delay(50);
     }
 
     const [task] = await taskStore.list();
+    if (task.state !== "completed") {
+      const output = await taskStore.readOutput(task.id).catch(() => ({ content: "" }));
+      throw new Error(
+        `expected verifier task to complete; got state=${task.state} error=${task.error ?? "<none>"} output=${output.content.slice(0, 500)}`
+      );
+    }
     expect(task).toMatchObject({
       type: "local_agent",
       state: "completed"
