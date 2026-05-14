@@ -14,6 +14,13 @@ export type CompactOptions = {
   keepFirstMessages?: number;
   keepLastMessages?: number;
   maxMessageChars?: number;
+  /**
+   * Synchronously invoked with the (unsnipped) messages that were dropped
+   * by compaction. Callers can capture this slice to persist it as an
+   * archive on disk so the compaction is reversible / inspectable.
+   * Not called if no messages were omitted.
+   */
+  archiveSink?: (omitted: readonly Message[]) => void;
 };
 
 export function estimateTokensForText(text: string): number {
@@ -63,6 +70,12 @@ export function compactMessages(
   const last = snipped.slice(-keepLast);
   const omitted = snipped.slice(keepFirst, -keepLast);
   const omittedTokens = estimateMessagesTokens(omitted);
+  // Hand the dropped slice to the caller so it can be archived on disk.
+  // Pass the *original* (unsnipped) messages — snipped content would be lossy.
+  const omittedOriginal = messages.slice(keepFirst, messages.length - keepLast);
+  if (omittedOriginal.length > 0) {
+    options.archiveSink?.(omittedOriginal);
+  }
 
   return [
     ...first,

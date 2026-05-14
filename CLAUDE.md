@@ -70,7 +70,7 @@ When adding a tool, register it through `buildTool` in `packages/tools/src/index
 
 ### State, sessions, and artifacts
 
-- `createSessionStore(cwd)` persists each turn's transcript under `.myagent/sessions/`. `replayMessagesFromSession` reconstructs `Message[]` for `resume` / TUI continuation. `compactSessionRecord` is the headless simple-snip compaction used by `myagent compact`.
+- `createSessionStore(cwd)` persists each turn's transcript under `.myagent/sessions/`. `replayMessagesFromSession` reconstructs `Message[]` for `resume` / TUI continuation. `compactSessionRecord` is the headless simple-snip compaction used by `myagent compact` and the TUI `/compact`; it accepts an optional async `archiver` that receives the dropped (unsnipped) messages and returns a path stamped onto the resulting `compact` event as `archivePath`. The CLI wires this to `.myagent/artifacts/<sessionId>/compactions/<at>.json` so compactions are reversible / inspectable via `myagent resume <id> --show-compactions`.
 - Long tool outputs over the configured budget (`toolResultBudgetChars`, default 8192) are spilled to `.myagent/artifacts/<sessionId>/`; the model gets a pointer.
 - Bootstrap state (current `sessionId`, model, permission mode, token usage, cost) is held in `state.ts` via `initializeBootstrapState` / `getBootstrapState` / `updateBootstrapState`. The CLI updates token + cost after each `assistant_message`.
 - Hooks load as a frozen `HookSnapshot` from `.myagent/hooks.json` once per turn — they don't re-read disk mid-loop.

@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createTaskStore, FakeModel, ModelError, runLocalBashTask, type ModelClient } from "@mini-claude-code/core";
+import {
+  createSessionStore,
+  createTaskStore,
+  FakeModel,
+  ModelError,
+  runLocalBashTask,
+  type ModelClient,
+  type SessionEvent
+} from "@mini-claude-code/core";
 
 import { loadEnvironment, runCli } from "../src/index.js";
 
@@ -515,6 +523,84 @@ describe("myagent cli", () => {
       events: Array<{ type: string }>;
     };
     expect(record.events.at(-1)?.type).toBe("compact");
+  });
+
+  it("archives dropped messages and lists them via resume --show-compactions", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-cli-compact-archive-"));
+    const sessionRootDir = join(cwd, ".myagent", "sessions");
+    const artifactRootDir = join(cwd, ".myagent", "artifacts");
+    const store = createSessionStore(cwd, sessionRootDir);
+
+    const fixture = await store.create({
+      sessionId: "sess_archive_fixture",
+      cwd,
+      model: "test-model",
+      permissionMode: "default",
+      costUsd: 0,
+      tokenUsage: { inputTokens: 0, outputTokens: 0 }
+    });
+    // Append enough events that compactMessages will drop the middle slice
+    // (the snipped total must exceed the 8000-token default target).
+    const filler: SessionEvent[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      filler.push({
+        type: "user_message",
+        message: { role: "user", content: `request ${i}` },
+        at: new Date(Date.parse(fixture.createdAt) + i * 2_000).toISOString()
+      });
+      filler.push({
+        type: "assistant_message",
+        message: { role: "assistant", content: "x".repeat(3_000) },
+        at: new Date(Date.parse(fixture.createdAt) + i * 2_000 + 1_000).toISOString()
+      });
+    }
+    await store.save({ ...fixture, events: [...fixture.events, ...filler] });
+
+    const compactStdout = captureWriter();
+    const compactStderr = captureWriter();
+    const compactExit = await runCli(
+      ["compact", fixture.sessionId],
+      compactStdout.writer,
+      compactStderr.writer,
+      { cwd, sessionRootDir, artifactRootDir, env: {} }
+    );
+    expect(compactExit).toBe(0);
+    expect(compactStdout.text()).toContain("Archived dropped messages to");
+    expect(compactStderr.text()).toBe("");
+
+    const compactionsDir = join(artifactRootDir, fixture.sessionId, "compactions");
+    const archiveFiles = readdirSync(compactionsDir);
+    expect(archiveFiles).toHaveLength(1);
+    expect(archiveFiles[0]).toMatch(/\.json$/);
+
+    const archive = JSON.parse(readFileSync(join(compactionsDir, archiveFiles[0]), "utf8")) as {
+      version: number;
+      sessionId: string;
+      at: string;
+      omitted: Array<{ role: string; content: unknown }>;
+    };
+    expect(archive.version).toBe(1);
+    expect(archive.sessionId).toBe(fixture.sessionId);
+    expect(archive.omitted.length).toBeGreaterThan(0);
+    // Sanity: round-trip preserves the original unsnipped content.
+    const assistantOmissions = archive.omitted.filter((m) => m.role === "assistant");
+    expect(assistantOmissions.length).toBeGreaterThan(0);
+    expect(typeof assistantOmissions[0]?.content === "string"
+      ? assistantOmissions[0].content
+      : "").not.toContain("[snip:");
+
+    const inspectStdout = captureWriter();
+    const inspectStderr = captureWriter();
+    const inspectExit = await runCli(
+      ["resume", fixture.sessionId, "--show-compactions"],
+      inspectStdout.writer,
+      inspectStderr.writer,
+      { cwd, sessionRootDir, env: {} }
+    );
+    expect(inspectExit).toBe(0);
+    expect(inspectStdout.text()).toContain("[compactions] 1");
+    expect(inspectStdout.text()).toContain(archiveFiles[0]);
+    expect(inspectStderr.text()).toBe("");
   });
 
   it("runs the week 12 offline usage audit and writes transcripts", async () => {

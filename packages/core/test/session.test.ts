@@ -115,7 +115,7 @@ describe("session transcript store", () => {
 
     const record = await store.load(bootstrap.sessionId);
     const beforeTokens = estimateMessagesTokens(replayMessagesFromSession(record));
-    const compacted = compactSessionRecord(record, {
+    const compacted = await compactSessionRecord(record, {
       targetTokens: 20,
       keepFirstMessages: 1,
       keepLastMessages: 1,
