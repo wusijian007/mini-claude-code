@@ -73,6 +73,19 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Cache token accounting
+
+| Invariant | Test |
+|---|---|
+| `addTokenUsage` sums `cacheCreationInputTokens` + `cacheReadInputTokens` alongside input/output | `packages/core/test/security/cache-accounting.test.ts` |
+| `addTokenUsage` treats missing cache delta fields as zero (back-compat with non-cache turns) | `packages/core/test/security/cache-accounting.test.ts` |
+| `createBootstrapState` initializes all four token fields to zero | `packages/core/test/security/cache-accounting.test.ts` |
+| `estimateUsageCostUsd` factors `cacheWriteUsdPerMillionTokens` / `cacheReadUsdPerMillionTokens` rates | `packages/core/test/security/cache-accounting.test.ts` |
+| Cache write rate defaults to base input rate when unset; cache read rate defaults to 0 | `packages/core/test/security/cache-accounting.test.ts` |
+| `normalizeBootstrap` defaults missing cache fields to 0 on pre-M1.5a session JSON | `packages/core/test/session.test.ts` |
+| `myagent usage <sessionId>` walks `assistant_message` events and renders per-turn token + cost breakdown | `packages/cli/test/cli.test.ts` |
+| `myagent usage <missing>` exits non-zero with a clear error | `packages/cli/test/cli.test.ts` |
+
 ### Compaction archive
 
 | Invariant | Test |

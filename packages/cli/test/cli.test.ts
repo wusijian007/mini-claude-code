@@ -525,6 +525,103 @@ describe("myagent cli", () => {
     expect(record.events.at(-1)?.type).toBe("compact");
   });
 
+  it("prints per-turn token + cost breakdown via myagent usage", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-cli-usage-"));
+    const sessionRootDir = join(cwd, ".myagent", "sessions");
+    const store = createSessionStore(cwd, sessionRootDir);
+    const fixture = await store.create({
+      sessionId: "sess_usage_fixture",
+      cwd,
+      model: "claude-test",
+      permissionMode: "default",
+      costUsd: 0
+    });
+    const events: SessionEvent[] = [
+      {
+        type: "user_message",
+        message: { role: "user", content: "hi" },
+        at: new Date(1_700_000_000_000).toISOString()
+      },
+      {
+        type: "assistant_message",
+        message: { role: "assistant", content: "first reply" },
+        usage: {
+          inputTokens: 1_000,
+          outputTokens: 200,
+          cacheCreationInputTokens: 500,
+          cacheReadInputTokens: 0
+        },
+        requestId: "req_first_abcdef",
+        at: new Date(1_700_000_001_000).toISOString()
+      },
+      {
+        type: "user_message",
+        message: { role: "user", content: "again" },
+        at: new Date(1_700_000_002_000).toISOString()
+      },
+      {
+        type: "assistant_message",
+        message: { role: "assistant", content: "second reply" },
+        usage: {
+          inputTokens: 300,
+          outputTokens: 100,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 500
+        },
+        requestId: "req_second_xyz",
+        at: new Date(1_700_000_003_000).toISOString()
+      }
+    ];
+    await store.save({ ...fixture, events: [...fixture.events, ...events] });
+
+    const stdout = captureWriter();
+    const stderr = captureWriter();
+    const exit = await runCli(
+      ["usage", fixture.sessionId],
+      stdout.writer,
+      stderr.writer,
+      {
+        cwd,
+        sessionRootDir,
+        env: {
+          MYAGENT_INPUT_USD_PER_MTOK: "3",
+          MYAGENT_OUTPUT_USD_PER_MTOK: "15",
+          MYAGENT_CACHE_WRITE_USD_PER_MTOK: "3.75",
+          MYAGENT_CACHE_READ_USD_PER_MTOK: "0.3"
+        }
+      }
+    );
+
+    expect(exit).toBe(0);
+    expect(stderr.text()).toBe("");
+    const out = stdout.text();
+    expect(out).toContain(`[usage] ${fixture.sessionId}`);
+    expect(out).toContain("model: claude-test");
+    expect(out).toContain("turns: 2");
+    expect(out).toContain("req_first_abcd"); // truncated to 14 chars
+    expect(out).toContain("req_second_xyz");
+    // First turn cost: 1000/1e6 * 3 + 200/1e6 * 15 + 500/1e6 * 3.75 = 0.003 + 0.003 + 0.001875 ≈ 0.0079
+    expect(out).toMatch(/\$0\.0079/);
+    // Second turn cost: 300/1e6 * 3 + 100/1e6 * 15 + 500/1e6 * 0.3 = 0.0009 + 0.0015 + 0.00015 ≈ 0.0026
+    expect(out).toMatch(/\$0\.0026/);
+    // Totals row
+    expect(out).toMatch(/total[\s\S]*1300[\s\S]*300[\s\S]*500[\s\S]*500/);
+  });
+
+  it("reports a clear error when myagent usage is given a missing session id", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-cli-usage-missing-"));
+    const stdout = captureWriter();
+    const stderr = captureWriter();
+    const exit = await runCli(
+      ["usage", "sess_does_not_exist"],
+      stdout.writer,
+      stderr.writer,
+      { cwd, sessionRootDir: join(cwd, ".myagent", "sessions"), env: {} }
+    );
+    expect(exit).toBe(1);
+    expect(stderr.text()).toContain("Could not load session sess_does_not_exist");
+  });
+
   it("archives dropped messages and lists them via resume --show-compactions", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "myagent-cli-compact-archive-"));
     const sessionRootDir = join(cwd, ".myagent", "sessions");

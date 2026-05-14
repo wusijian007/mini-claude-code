@@ -6,6 +6,16 @@ import type { PermissionMode } from "./types.js";
 export type TokenUsage = {
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Cumulative count of tokens written into Anthropic's prompt cache
+   * over the session's lifetime. Always present (zero before any cached
+   * turn occurs and on sessions persisted before M1.5a).
+   */
+  cacheCreationInputTokens: number;
+  /**
+   * Cumulative count of tokens served from prompt cache hits.
+   */
+  cacheReadInputTokens: number;
 };
 
 export type BootstrapState = {
@@ -36,7 +46,9 @@ export function createBootstrapState(options: BootstrapStateOptions): BootstrapS
     costUsd: options.costUsd ?? 0,
     tokenUsage: {
       inputTokens: options.tokenUsage?.inputTokens ?? 0,
-      outputTokens: options.tokenUsage?.outputTokens ?? 0
+      outputTokens: options.tokenUsage?.outputTokens ?? 0,
+      cacheCreationInputTokens: options.tokenUsage?.cacheCreationInputTokens ?? 0,
+      cacheReadInputTokens: options.tokenUsage?.cacheReadInputTokens ?? 0
     },
     permissionMode: options.permissionMode
   };
@@ -125,7 +137,11 @@ export function addTokenUsage(
 ): TokenUsage {
   return {
     inputTokens: current.inputTokens + (delta?.inputTokens ?? 0),
-    outputTokens: current.outputTokens + (delta?.outputTokens ?? 0)
+    outputTokens: current.outputTokens + (delta?.outputTokens ?? 0),
+    cacheCreationInputTokens:
+      current.cacheCreationInputTokens + (delta?.cacheCreationInputTokens ?? 0),
+    cacheReadInputTokens:
+      current.cacheReadInputTokens + (delta?.cacheReadInputTokens ?? 0)
   };
 }
 

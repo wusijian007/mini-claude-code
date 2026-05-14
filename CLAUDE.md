@@ -25,7 +25,7 @@ The CLI binary entry is `packages/cli/dist/index.js` (exposed as `myagent`). The
 ### Environment
 
 - `ANTHROPIC_API_KEY` — required for real model calls (`chat`, `agent`, `tui`). Read from process env or a local `.env` (parsed by `loadEnvironment` in `packages/cli/src/index.ts`; only an allow-listed set of keys is honored).
-- `ANTHROPIC_BASE_URL`, `MYAGENT_MODEL`, `MYAGENT_PERMISSION_MODE`, `MYAGENT_INPUT_USD_PER_MTOK`, `MYAGENT_OUTPUT_USD_PER_MTOK` — optional overrides.
+- `ANTHROPIC_BASE_URL`, `MYAGENT_MODEL`, `MYAGENT_PERMISSION_MODE`, `MYAGENT_INPUT_USD_PER_MTOK`, `MYAGENT_OUTPUT_USD_PER_MTOK`, `MYAGENT_CACHE_WRITE_USD_PER_MTOK`, `MYAGENT_CACHE_READ_USD_PER_MTOK` — optional overrides. The two cache-rate vars feed `estimateUsageCostUsd` and surface in `myagent usage <sessionId>` once prompt caching is enabled in M1.5b.
 - Offline tests use `FakeModel` and do not need an API key.
 - Runtime state (sessions, artifacts, profiles, tasks, fork traces, memory) is written under `.myagent/` in the cwd; gitignored.
 

@@ -52,7 +52,12 @@ describe("bootstrap state", () => {
       tokenUsage: addTokenUsage(state.tokenUsage, { inputTokens: 12, outputTokens: 8 })
     }));
 
-    expect(updated.tokenUsage).toEqual({ inputTokens: 12, outputTokens: 8 });
+    expect(updated.tokenUsage).toEqual({
+      inputTokens: 12,
+      outputTokens: 8,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0
+    });
   });
 
   it("creates independent bootstrap snapshots when no singleton is needed", () => {
@@ -64,7 +69,12 @@ describe("bootstrap state", () => {
     });
 
     expect(state.sessionId).toMatch(/^sess_/);
-    expect(state.tokenUsage).toEqual({ inputTokens: 1, outputTokens: 0 });
+    expect(state.tokenUsage).toEqual({
+      inputTokens: 1,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0
+    });
   });
 });
 
