@@ -42,6 +42,13 @@ export type SessionEvent =
       beforeEvents: number;
       afterEvents: number;
       at: string;
+      /**
+       * Absolute path to the JSON archive of the messages that were
+       * dropped by this compaction. Absent when the caller did not
+       * supply an archiver (e.g. headless `query` retry on
+       * prompt_too_long, or older sessions before M1.4).
+       */
+      archivePath?: string;
     };
 
 export type SessionEventInput =
@@ -74,6 +81,7 @@ export type SessionEventInput =
       afterTokens: number;
       beforeEvents: number;
       afterEvents: number;
+      archivePath?: string;
     };
 
 export type SessionRecord = {
@@ -179,23 +187,53 @@ export function replayMessagesFromSession(record: SessionRecord): Message[] {
   return messages;
 }
 
-export function compactSessionRecord(
+/**
+ * Persists the messages a compaction is about to drop. Called with the
+ * (unsnipped) omitted slice and the compaction's `at` timestamp. The
+ * returned string (typically an absolute path) is recorded on the
+ * resulting `compact` event as `archivePath` so callers can recover
+ * the original transcript later. Return `undefined` to skip recording
+ * a path (e.g. if persistence fails best-effort).
+ */
+export type SessionCompactionArchiver = (
+  omitted: readonly Message[],
+  at: string
+) => Promise<string | undefined> | string | undefined;
+
+export type CompactSessionRecordOptions = CompactOptions & {
+  archiver?: SessionCompactionArchiver;
+};
+
+export async function compactSessionRecord(
   record: SessionRecord,
-  options: CompactOptions = {}
-): SessionRecord {
+  options: CompactSessionRecordOptions = {}
+): Promise<SessionRecord> {
   const beforeMessages = replayMessagesFromSession(record);
   const beforeTokens = estimateMessagesTokens(beforeMessages);
-  const compactedMessages = compactMessages(beforeMessages, options);
+  let omittedCapture: readonly Message[] = [];
+  const compactedMessages = compactMessages(beforeMessages, {
+    ...options,
+    archiveSink: (omitted) => {
+      omittedCapture = omitted;
+      options.archiveSink?.(omitted);
+    }
+  });
   const afterTokens = estimateMessagesTokens(compactedMessages);
   const compactedEvents = eventsFromMessages(compactedMessages);
   const terminalState = [...record.events].reverse().find((event) => event.type === "terminal_state");
+  const at = nowIso();
+  let archivePath: string | undefined;
+  if (options.archiver && omittedCapture.length > 0) {
+    archivePath = (await options.archiver(omittedCapture, at)) ?? undefined;
+  }
   const compactEvent: SessionEvent = {
     type: "compact",
     beforeTokens,
     afterTokens,
     beforeEvents: record.events.length,
     afterEvents: compactedEvents.length + (terminalState ? 2 : 1),
-    at: nowIso()
+    at,
+    archivePath
   };
 
   return {

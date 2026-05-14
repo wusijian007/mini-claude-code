@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
@@ -44,6 +44,8 @@ import {
   formatRemoteSessionList,
   type Message,
   type MemoryEntry,
+  type SessionCompactionArchiver,
+  type SessionEvent,
   type ModelClient,
   type ModelStreamEvent,
   type PermissionDecision,
@@ -113,7 +115,9 @@ Week 18 scope:
   week18 finalize runs the final offline smoke suite and writes a portfolio report.
   memory list shows editable long-term memory entries that will be recalled into future turns.
   resume <sessionId> prints a saved transcript, or continues it when a prompt is provided.
+  resume <sessionId> --show-compactions lists every compaction event with its archive path.
   compact <sessionId> runs headless simple snip compaction on a saved transcript.
+  compact archives the dropped messages under .myagent/artifacts/<session>/compactions/<at>.json.
   --permission-mode controls tool execution policy. Default: default.
   Edit and Write require --permission-mode bypassPermissions in this headless CLI.
   Set ANTHROPIC_API_KEY before using chat, or place it in .env.
@@ -277,17 +281,65 @@ async function runCompact(
 
   try {
     const record = await sessionStore.load(sessionId);
-    const compacted = compactSessionRecord(record);
+    const compacted = await compactSessionRecord(record, {
+      archiver: compactionArchiverFor(cwd, sessionId, dependencies)
+    });
     await sessionStore.save(compacted);
     const compactEvent = [...compacted.events].reverse().find((event) => event.type === "compact");
     stdout.write(
       `Compacted ${sessionId}: ${compactEvent?.beforeTokens ?? "?"}->${compactEvent?.afterTokens ?? "?"} estimated tokens\n`
     );
+    if (compactEvent?.type === "compact" && compactEvent.archivePath) {
+      stdout.write(`Archived dropped messages to ${compactEvent.archivePath}\n`);
+    }
     return 0;
   } catch (error) {
     stderr.write(`Could not compact session ${sessionId}: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
+}
+
+function formatCompactionList(events: readonly SessionEvent[]): string {
+  const compactions = events.filter((event): event is Extract<SessionEvent, { type: "compact" }> => event.type === "compact");
+  if (compactions.length === 0) {
+    return "\n[compactions] none\n";
+  }
+  const lines = [`\n[compactions] ${compactions.length}`];
+  compactions.forEach((event, index) => {
+    const tokens = `${event.beforeTokens}->${event.afterTokens}`;
+    const archive = event.archivePath ?? "<not archived>";
+    lines.push(`  ${index + 1}. ${event.at}  tokens=${tokens}  archive=${archive}`);
+  });
+  return `${lines.join("\n")}\n`;
+}
+
+function compactionArtifactRoot(cwd: string, dependencies: CliDependencies, sessionId: string): string {
+  return join(
+    dependencies.artifactRootDir ?? join(cwd, ".myagent", "artifacts"),
+    sessionId,
+    "compactions"
+  );
+}
+
+function compactionArchiverFor(
+  cwd: string,
+  sessionId: string,
+  dependencies: CliDependencies
+): SessionCompactionArchiver {
+  return async (omitted, at) => {
+    const dir = compactionArtifactRoot(cwd, dependencies, sessionId);
+    await mkdir(dir, { recursive: true });
+    const safeAt = at.replace(/[:.]/g, "-");
+    const filePath = join(dir, `${safeAt}.json`);
+    const payload = {
+      version: 1,
+      sessionId,
+      at,
+      omitted
+    };
+    await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    return filePath;
+  };
 }
 
 async function runMemory(
@@ -845,9 +897,16 @@ async function runResume(
   stderr: WritableLike,
   dependencies: CliDependencies
 ): Promise<number> {
-  const sessionId = args[0];
+  const showCompactionsIdx = args.indexOf("--show-compactions");
+  const showCompactions = showCompactionsIdx !== -1;
+  const positional = showCompactions
+    ? [...args.slice(0, showCompactionsIdx), ...args.slice(showCompactionsIdx + 1)]
+    : args;
+  const sessionId = positional[0];
   if (!sessionId) {
-    stderr.write("Missing session id. Usage: myagent resume <sessionId> [prompt]\n");
+    stderr.write(
+      "Missing session id. Usage: myagent resume <sessionId> [prompt] [--show-compactions]\n"
+    );
     return 1;
   }
 
@@ -863,9 +922,12 @@ async function runResume(
     return 1;
   }
 
-  const prompt = args.slice(1).join(" ").trim();
+  const prompt = positional.slice(1).join(" ").trim();
   if (!prompt) {
     stdout.write(summarizeSession(record));
+    if (showCompactions) {
+      stdout.write(formatCompactionList(record.events));
+    }
     return 0;
   }
 
@@ -942,6 +1004,7 @@ async function runTui(
           stdout,
           stderr,
           cwd,
+          dependencies,
           sessionStore,
           memoryStore,
           skillSnapshot,
@@ -1055,6 +1118,7 @@ type SlashCommandContext = {
   stdout: WritableLike;
   stderr: WritableLike;
   cwd: string;
+  dependencies: CliDependencies;
   sessionStore: ReturnType<typeof createSessionStore>;
   memoryStore: MemoryStore;
   skillSnapshot: SkillSnapshot;
@@ -1132,13 +1196,18 @@ async function handleSlashCommand(context: SlashCommandContext): Promise<"contin
     }
     try {
       const record = await context.sessionStore.load(sessionId);
-      const compacted = compactSessionRecord(record);
+      const compacted = await compactSessionRecord(record, {
+        archiver: compactionArchiverFor(context.cwd, sessionId, context.dependencies)
+      });
       await context.sessionStore.save(compacted);
       context.setSession(compacted);
       const compactEvent = [...compacted.events].reverse().find((event) => event.type === "compact");
       context.stdout.write(
         `[compact] ${sessionId}: ${compactEvent?.beforeTokens ?? "?"}->${compactEvent?.afterTokens ?? "?"} estimated tokens\n`
       );
+      if (compactEvent?.type === "compact" && compactEvent.archivePath) {
+        context.stdout.write(`[compact] archived ${compactEvent.archivePath}\n`);
+      }
     } catch (error) {
       context.stderr.write(
         `Could not compact session ${sessionId}: ${error instanceof Error ? error.message : String(error)}\n`

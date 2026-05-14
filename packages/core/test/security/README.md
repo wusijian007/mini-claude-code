@@ -73,6 +73,18 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Compaction archive
+
+| Invariant | Test |
+|---|---|
+| `compactMessages` invokes the optional `archiveSink` with the *unsnipped* dropped slice when omission happens | `packages/core/test/security/compaction-archive.test.ts` |
+| `compactMessages` does NOT invoke `archiveSink` when nothing is dropped (snipping-only path) | `packages/core/test/security/compaction-archive.test.ts` |
+| `compactSessionRecord(record, { archiver })` awaits the archiver and records the returned path on the `compact` event as `archivePath` | `packages/core/test/security/compaction-archive.test.ts` |
+| Omitting the `archiver` leaves `archivePath` undefined (back-compat) | `packages/core/test/security/compaction-archive.test.ts` |
+| `archiver` returning `undefined` (best-effort failure) leaves `archivePath` unset; the record still saves | `packages/core/test/security/compaction-archive.test.ts` |
+| `myagent compact <id>` writes the dropped slice to `.myagent/artifacts/<sessionId>/compactions/<at>.json` and prints the archive path | `packages/cli/test/cli.test.ts` |
+| `myagent resume <id> --show-compactions` lists each compaction with its archive path | `packages/cli/test/cli.test.ts` |
+
 ### Remote WebSocket auth
 
 | Invariant | Test |
