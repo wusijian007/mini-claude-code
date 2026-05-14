@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { SystemTextBlock } from "./model.js";
 import type { Message, ToolDefinition } from "./types.js";
 
 export type ForkTrace = {
@@ -18,15 +19,25 @@ export type ForkTraceInput = {
   parentDepth: number;
   subagentType: string;
   model: string;
-  systemPrompt?: string;
+  systemPrompt?: string | readonly SystemTextBlock[];
   tools: readonly ToolDefinition[];
   prefixMessages: readonly Message[];
   directive: string;
   previous?: ForkTrace;
 };
 
+function systemPromptToHashable(systemPrompt: ForkTraceInput["systemPrompt"]): string {
+  if (systemPrompt === undefined) {
+    return "";
+  }
+  if (typeof systemPrompt === "string") {
+    return systemPrompt;
+  }
+  return systemPrompt.map((block) => block.text).join("\n\n");
+}
+
 export function createForkTrace(input: ForkTraceInput): ForkTrace {
-  const systemPromptHash = sha256(input.systemPrompt ?? "");
+  const systemPromptHash = sha256(systemPromptToHashable(input.systemPrompt));
   const toolHash = hashToolDefinitions(input.tools);
   const prefixHash = hashMessages(input.prefixMessages);
   const directiveHash = sha256(input.directive);
