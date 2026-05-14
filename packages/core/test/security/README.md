@@ -73,6 +73,16 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Prompt caching plumbing
+
+| Invariant | Test |
+|---|---|
+| `toAnthropicTools` marks the *last* tool with `cache_control: { type: "ephemeral" }` so the full tool list becomes a single cache breakpoint | `packages/core/test/security/prompt-caching.test.ts` |
+| `toAnthropicTools` returns `{}` (no tools, no spurious cache marker) on an empty/undefined input | `packages/core/test/security/prompt-caching.test.ts` |
+| `toModelUsage` extracts `cache_creation_input_tokens` + `cache_read_input_tokens` when the SDK provides them | `packages/core/test/security/prompt-caching.test.ts` |
+| `toModelUsage` leaves cache fields `undefined` on non-cached turns (the SDK omits them) | `packages/core/test/security/prompt-caching.test.ts` |
+| The agent's outbound `request.system` is a `SystemTextBlock[]` (not a string) with `cache_control: ephemeral` on the block | `packages/cli/test/cli.test.ts` |
+
 ### Cache token accounting
 
 | Invariant | Test |

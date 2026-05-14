@@ -161,8 +161,19 @@ export class AnthropicModelClient implements ModelClient {
           stop_reason?: string | null;
           partial_json?: string;
         };
-        message?: { usage?: { input_tokens?: number; output_tokens?: number } };
-        usage?: { output_tokens?: number };
+        message?: {
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+          };
+        };
+        usage?: {
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
       };
 
       if (typed.type === "message_start") {
@@ -227,7 +238,11 @@ export class AnthropicModelClient implements ModelClient {
         stopReason = typed.delta?.stop_reason;
         usage = {
           ...usage,
-          outputTokens: typed.usage?.output_tokens ?? usage?.outputTokens
+          outputTokens: typed.usage?.output_tokens ?? usage?.outputTokens,
+          cacheCreationInputTokens:
+            typed.usage?.cache_creation_input_tokens ?? usage?.cacheCreationInputTokens,
+          cacheReadInputTokens:
+            typed.usage?.cache_read_input_tokens ?? usage?.cacheReadInputTokens
         };
       }
     }
@@ -403,28 +418,40 @@ function toInternalContent(
   return content;
 }
 
-function toAnthropicTools(
+export function toAnthropicTools(
   tools: readonly ModelToolDefinition[] | undefined
 ): { tools?: Array<Record<string, unknown>> } {
   if (!tools || tools.length === 0) {
     return {};
   }
 
-  return {
-    tools: tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema
-    }))
-  };
+  const mapped: Array<Record<string, unknown>> = tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema
+  }));
+  // Mark the last tool with cache_control so the entire tool list becomes
+  // a single prompt-cache breakpoint. Tools rarely change across turns,
+  // so this caches the largest stable input segment after the system
+  // prompt. The marker is harmless on uncached calls.
+  const lastIndex = mapped.length - 1;
+  mapped[lastIndex] = { ...mapped[lastIndex], cache_control: { type: "ephemeral" } };
+  return { tools: mapped };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function toModelUsage(
-  usage: { input_tokens?: number; output_tokens?: number } | undefined
+export function toModelUsage(
+  usage:
+    | {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      }
+    | undefined
 ): ModelUsage | undefined {
   if (!usage) {
     return undefined;
@@ -432,7 +459,9 @@ function toModelUsage(
 
   return {
     inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens
+    outputTokens: usage.output_tokens,
+    cacheCreationInputTokens: usage.cache_creation_input_tokens,
+    cacheReadInputTokens: usage.cache_read_input_tokens
   };
 }
 

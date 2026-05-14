@@ -23,11 +23,28 @@ export type ModelUsage = {
   cacheReadInputTokens?: number;
 };
 
+/**
+ * A single text block in a structured system prompt. The optional
+ * `cache_control` marker turns this block into an Anthropic prompt-cache
+ * breakpoint: the cumulative content up to and including this block is
+ * cached and reused across requests that share the same prefix.
+ */
+export type SystemTextBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: "ephemeral" };
+};
+
 export type ModelRequest = {
   messages: readonly Message[];
   model?: string;
   maxTokens?: number;
-  system?: string;
+  /**
+   * The system prompt. A plain string preserves the legacy flat form
+   * (no caching). An array of `SystemTextBlock`s enables structured
+   * caching when at least one block carries `cache_control`.
+   */
+  system?: string | readonly SystemTextBlock[];
   requestId?: string;
   timeoutMs?: number;
   signal?: AbortSignal;

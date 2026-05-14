@@ -46,6 +46,7 @@ import {
   type MemoryEntry,
   type SessionCompactionArchiver,
   type SessionEvent,
+  type SystemTextBlock,
   type ModelClient,
   type ModelStreamEvent,
   type PermissionDecision,
@@ -1576,6 +1577,18 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
           profile.addMetric("model.output_tokens", event.usage.outputTokens ?? 0, "tokens", {
             requestId: event.requestId
           });
+          profile.addMetric(
+            "model.cache_creation_input_tokens",
+            event.usage.cacheCreationInputTokens ?? 0,
+            "tokens",
+            { requestId: event.requestId }
+          );
+          profile.addMetric(
+            "model.cache_read_input_tokens",
+            event.usage.cacheReadInputTokens ?? 0,
+            "tokens",
+            { requestId: event.requestId }
+          );
           profile.addMetric("model.cost_usd", costDelta, "usd", {
             requestId: event.requestId,
             estimated: true
@@ -1638,6 +1651,16 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
     const finalState = getBootstrapState();
     profile.addMetric("session.input_tokens", finalState.tokenUsage.inputTokens, "tokens");
     profile.addMetric("session.output_tokens", finalState.tokenUsage.outputTokens, "tokens");
+    profile.addMetric(
+      "session.cache_creation_input_tokens",
+      finalState.tokenUsage.cacheCreationInputTokens,
+      "tokens"
+    );
+    profile.addMetric(
+      "session.cache_read_input_tokens",
+      finalState.tokenUsage.cacheReadInputTokens,
+      "tokens"
+    );
     profile.addMetric("session.cost_usd", finalState.costUsd, "usd", { estimated: true });
     await profileStore.save(profile.finish("completed")).catch(() => undefined);
     return { exitCode: 0, sessionId: bootstrap.sessionId };
@@ -1856,10 +1879,28 @@ function parseOptionalNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-function buildAgentSystemPrompt(memoryContext: string, skillContext: string): string {
-  return [READ_ONLY_AGENT_SYSTEM_PROMPT, memoryContext.trim(), skillContext.trim()]
+/**
+ * Returns the agent's system prompt as a structured block array so we
+ * can mark it as a prompt-cache breakpoint. The combined content is
+ * placed in a single text block with `cache_control: ephemeral`, which
+ * tells Anthropic to cache the entire system prompt: identical reuse
+ * across every turn of a session, since memory + skill snapshots are
+ * captured once at session start.
+ */
+function buildAgentSystemPrompt(
+  memoryContext: string,
+  skillContext: string
+): readonly SystemTextBlock[] {
+  const combined = [READ_ONLY_AGENT_SYSTEM_PROMPT, memoryContext.trim(), skillContext.trim()]
     .filter((part) => part.length > 0)
     .join("\n\n");
+  return [
+    {
+      type: "text",
+      text: combined,
+      cache_control: { type: "ephemeral" }
+    }
+  ];
 }
 
 const READ_ONLY_AGENT_SYSTEM_PROMPT = `You are myagent Week 18, a safety-first coding agent.

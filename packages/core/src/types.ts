@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { ModelClient, ModelUsage } from "./model.js";
+import type { ModelClient, ModelUsage, SystemTextBlock } from "./model.js";
 import type { ForkTrace } from "./fork.js";
 import type { ProfileRecorder } from "./profile.js";
 import type { TaskStore } from "./task.js";
@@ -78,7 +78,7 @@ export type ToolContext = {
   model?: ModelClient;
   modelName?: string;
   maxTokens?: number;
-  system?: string;
+  system?: string | readonly SystemTextBlock[];
   parentMessages?: readonly Message[];
   tools?: readonly ToolDefinition[];
   taskStore?: TaskStore;

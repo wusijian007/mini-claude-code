@@ -26,6 +26,12 @@ function captureWriter() {
   };
 }
 
+function systemToText(system: string | ReadonlyArray<{ type: "text"; text: string }> | undefined): string {
+  if (system === undefined) return "";
+  if (typeof system === "string") return system;
+  return system.map((block) => block.text).join("\n\n");
+}
+
 describe("myagent cli", () => {
   it("prints version without starting agent runtime", async () => {
     const stdout = captureWriter();
@@ -150,7 +156,7 @@ describe("myagent cli", () => {
         };
       },
       async *stream(request) {
-        systems.push(request.system ?? "");
+        systems.push(systemToText(request.system));
         yield {
           type: "assistant_message",
           message: {
@@ -227,7 +233,7 @@ describe("myagent cli", () => {
             };
           },
           async *stream(request) {
-            systems.push(request.system ?? "");
+            systems.push(systemToText(request.system));
             yield {
               type: "assistant_message",
               message: { role: "assistant", content: "Use real DB integration fixtures." },
@@ -523,6 +529,48 @@ describe("myagent cli", () => {
       events: Array<{ type: string }>;
     };
     expect(record.events.at(-1)?.type).toBe("compact");
+  });
+
+  it("sends the agent's system prompt as a structured block with cache_control", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-cli-cache-system-"));
+    let capturedSystem: unknown;
+    const stdout = captureWriter();
+    const stderr = captureWriter();
+
+    const exitCode = await runCli(["agent", "summarize", "fixture"], stdout.writer, stderr.writer, {
+      cwd,
+      env: {},
+      createModelClient: () =>
+        ({
+          async create() {
+            return {
+              message: { role: "assistant", content: "ok" },
+              requestId: "req_cache"
+            };
+          },
+          async *stream(request) {
+            capturedSystem = request.system;
+            yield {
+              type: "assistant_message",
+              message: { role: "assistant", content: "fixture summary" },
+              requestId: "req_cache"
+            };
+          }
+        }) satisfies ModelClient
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stderr.text()).toBe("");
+    expect(Array.isArray(capturedSystem)).toBe(true);
+    const systemBlocks = capturedSystem as Array<{
+      type: string;
+      text: string;
+      cache_control?: { type: string };
+    }>;
+    expect(systemBlocks).toHaveLength(1);
+    expect(systemBlocks[0]?.type).toBe("text");
+    expect(systemBlocks[0]?.text).toContain("safety-first coding agent");
+    expect(systemBlocks[0]?.cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("prints per-turn token + cost breakdown via myagent usage", async () => {

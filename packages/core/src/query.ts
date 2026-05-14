@@ -10,7 +10,8 @@ import {
   type ModelClient,
   type ModelErrorKind,
   type ModelStreamEvent,
-  type ModelUsage
+  type ModelUsage,
+  type SystemTextBlock
 } from "./model.js";
 import { executeToolBatch, partitionToolCalls } from "./scheduler.js";
 import { toModelToolDefinition } from "./tool.js";
@@ -32,7 +33,7 @@ export type QueryOptions = {
   initialMessages: readonly Message[];
   tools: readonly ToolDefinition[];
   toolContext: ToolContext;
-  system?: string;
+  system?: string | readonly SystemTextBlock[];
   modelName?: string;
   maxTokens?: number;
   maxTurns?: number;
@@ -270,7 +271,7 @@ type CollectModelTurnWithRetryOptions = {
   messages: readonly Message[];
   modelName: string;
   maxTokens: number;
-  system?: string;
+  system?: string | readonly SystemTextBlock[];
   signal?: AbortSignal;
   tools: readonly ModelToolDefinition[];
   contextBudgetTokens: number;
