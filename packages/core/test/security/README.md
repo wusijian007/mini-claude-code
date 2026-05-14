@@ -73,6 +73,18 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Remote WebSocket auth
+
+| Invariant | Test |
+|---|---|
+| `myagent remote serve` requires a bearer token; missing `Authorization` header → HTTP 401 (no upgrade) | `packages/core/test/security/remote-auth.test.ts` |
+| Wrong token → HTTP 401 (no upgrade) | `packages/core/test/security/remote-auth.test.ts` |
+| Non-`Bearer` scheme (e.g. Basic) → HTTP 401 | `packages/core/test/security/remote-auth.test.ts` |
+| Correct token → upgrade succeeds and `ready` frame is delivered | `packages/core/test/security/remote-auth.test.ts` |
+| Token comparison uses `crypto.timingSafeEqual` (constant time) | code-level guarantee in `checkAuthHeader` (`remote.ts`) |
+| `ensureRemoteAuthToken` persists a 256-bit token in `.myagent/remote/auth.json` (mode 0o600 best-effort) and reuses it across restarts | `packages/core/test/security/remote-auth.test.ts` |
+| `remote sessions` metadata listing does not require or touch the auth file | `packages/core/test/security/remote-auth.test.ts` |
+
 ### TaskStore concurrency
 
 | Invariant | Test |

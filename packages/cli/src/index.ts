@@ -27,6 +27,7 @@ import {
   createRemoteSessionStore,
   createProfileRecorder,
   createProfileStore,
+  ensureRemoteAuthToken,
   markTaskKilled,
   ModelError,
   runLocalBashTask,
@@ -106,6 +107,7 @@ Week 18 scope:
   Agent sub-agents reuse the same query loop; explore is read-only and verifier defaults to background.
   fork traces record stable system/tool/prefix hashes for cache debugging.
   remote serve starts a local-only WebSocket endpoint for browser or local clients.
+  remote serve generates .myagent/remote/auth.json on first run; clients must send Authorization: Bearer <token>.
   remote writes require client UUIDs for dedupe; metadata supports detach/resume.
   profile startup records fast-path and cold-path checkpoints under .myagent/profiles.
   week18 finalize runs the final offline smoke suite and writes a portfolio report.
@@ -173,6 +175,7 @@ export type CliDependencies = {
   mcpConfigPath?: string;
   taskRootDir?: string;
   remoteRootDir?: string;
+  remoteAuthRootDir?: string;
   startTaskWorker?: (
     taskId: string,
     options: { cwd: string; taskRootDir?: string }
@@ -603,15 +606,19 @@ async function runRemote(
   }
 
   const env = dependencies.env ?? loadEnvironment(cwd, process.env);
+  const auth = await ensureRemoteAuthToken(cwd, dependencies.remoteAuthRootDir);
   const server = await createRemoteAgentServer({
     cwd,
     host: parsed.host,
     port: parsed.port,
     rootDir: dependencies.remoteRootDir,
+    authToken: auth.token,
     runPrompt: (input, sink) => runRemoteAgentTurn(input, sink, stdout, stderr, dependencies, cwd, env)
   });
   stdout.write(`[remote] listening ${server.url}\n`);
   stdout.write(`[remote] metadata ${server.store.rootDir}\n`);
+  stdout.write(`[remote] auth ${auth.path}${auth.created ? " (generated)" : ""}\n`);
+  stdout.write(`[remote] clients must send Authorization: Bearer <token from auth file>\n`);
 
   await waitForShutdownSignal();
   await server.close();

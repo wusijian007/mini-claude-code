@@ -76,7 +76,7 @@ When adding a tool, register it through `buildTool` in `packages/tools/src/index
 - Hooks load as a frozen `HookSnapshot` from `.myagent/hooks.json` once per turn — they don't re-read disk mid-loop.
 - Memory: `createMemoryStore` reads from `.myagent/projects/<project>/memory`. Memory is treated as user/project preference, not as authoritative code truth (see `READ_ONLY_AGENT_SYSTEM_PROMPT` in `packages/cli/src/index.ts`). Skills are scanned from `SKILL.md` frontmatter via `scanSkillSnapshot`.
 - Background tasks (`myagent task start-bash`) spawn a detached `task worker <id>` child process; state machine lives in `packages/core/src/task.ts` and persists to `.myagent/tasks/`.
-- Remote control (`myagent remote serve`) starts a local-only WebSocket endpoint backed by `createRemoteAgentServer`; metadata in `.myagent/remote/`.
+- Remote control (`myagent remote serve`) starts a local-only WebSocket endpoint backed by `createRemoteAgentServer`; metadata in `.myagent/remote/`. The server requires a bearer token on every upgrade — `ensureRemoteAuthToken` generates a 256-bit token in `.myagent/remote/auth.json` on first launch (file mode 0o600 best-effort; Windows degrades) and reuses it across restarts. Missing or wrong `Authorization: Bearer <token>` returns HTTP 401 pre-upgrade; the comparison uses `crypto.timingSafeEqual`.
 
 ### What's intentionally missing
 
