@@ -17,6 +17,7 @@ describe("remote websocket direct connect", () => {
     const server = await createRemoteAgentServer({
       cwd,
       port: 0,
+      authToken: "test-token",
       async runPrompt(input, sink) {
         runCount += 1;
         sink.writeStdout(`[agent] ${input.prompt}\n`);
@@ -28,7 +29,7 @@ describe("remote websocket direct connect", () => {
     });
 
     try {
-      const client = await connectRemoteClient({ port: server.port });
+      const client = await connectRemoteClient({ port: server.port, authToken: "test-token" });
       expect(await client.nextMessage()).toEqual({ type: "ready", protocolVersion: 1 });
 
       client.send({ type: "user_message", id: "write_1", prompt: "hello remote" });
@@ -51,7 +52,7 @@ describe("remote websocket direct connect", () => {
       expect(runCount).toBe(1);
       client.close();
 
-      const resumed = await connectRemoteClient({ port: server.port });
+      const resumed = await connectRemoteClient({ port: server.port, authToken: "test-token" });
       expect(await resumed.nextMessage()).toEqual({ type: "ready", protocolVersion: 1 });
       resumed.send({ type: "resume", id: "resume_1", sessionId });
       const resumeMessages = await resumed.readUntil((message) => message.type === "session_metadata");
@@ -75,6 +76,7 @@ describe("remote websocket direct connect", () => {
     const server = await createRemoteAgentServer({
       cwd,
       port: 0,
+      authToken: "test-token",
       async runPrompt(_input, sink) {
         const decision = await sink.requestPermission({
           toolName: "Write",
@@ -87,7 +89,7 @@ describe("remote websocket direct connect", () => {
     });
 
     try {
-      const client = await connectRemoteClient({ port: server.port });
+      const client = await connectRemoteClient({ port: server.port, authToken: "test-token" });
       expect(await client.nextMessage()).toEqual({ type: "ready", protocolVersion: 1 });
       client.send({ type: "user_message", id: "write_permission", prompt: "create note" });
       const permissionMessages = await client.readUntil((message) => message.type === "permission_request");
@@ -122,6 +124,7 @@ describe("remote websocket direct connect", () => {
     const server = await createRemoteAgentServer({
       cwd,
       port: 0,
+      authToken: "test-token",
       async runPrompt() {
         return { sessionId: "sess_unused", exitCode: 0 };
       }

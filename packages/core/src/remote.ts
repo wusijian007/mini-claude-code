@@ -1,7 +1,7 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
 import { Socket } from "node:net";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { normalizePath } from "./state.js";
@@ -138,8 +138,91 @@ export type RemoteAgentServerOptions = {
   host?: string;
   port?: number;
   rootDir?: string;
+  /**
+   * Bearer token required on every WebSocket upgrade.
+   * Use `ensureRemoteAuthToken(cwd)` to generate and persist one
+   * alongside the rest of the remote metadata under `.myagent/remote/`.
+   */
+  authToken: string;
   runPrompt(input: RemoteTurnInput, sink: RemoteTurnSink): Promise<RemoteTurnResult>;
 };
+
+export type RemoteAuthFile = {
+  version: 1;
+  token: string;
+  createdAt: string;
+};
+
+export type EnsureRemoteAuthTokenResult = {
+  token: string;
+  path: string;
+  created: boolean;
+};
+
+const REMOTE_AUTH_FILE_NAME = "auth.json";
+
+function resolveRemoteAuthPath(cwd: string, rootDir?: string): string {
+  const base = rootDir ?? join(cwd, ".myagent", "remote");
+  return resolve(base, REMOTE_AUTH_FILE_NAME);
+}
+
+/**
+ * Read `.myagent/remote/auth.json`, or create it with a fresh 256-bit
+ * URL-safe token if it doesn't exist. The file is written with mode 0o600
+ * (best-effort: a no-op on Windows). The token is the bearer credential
+ * required by the WebSocket upgrade handshake.
+ *
+ * @param rootDir Defaults to `<cwd>/.myagent/remote`; tests can override.
+ */
+export async function ensureRemoteAuthToken(
+  cwd: string,
+  rootDir?: string
+): Promise<EnsureRemoteAuthTokenResult> {
+  const filePath = resolveRemoteAuthPath(cwd, rootDir);
+
+  try {
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<RemoteAuthFile>;
+    if (parsed && typeof parsed.token === "string" && parsed.token.length >= 16) {
+      return { token: parsed.token, path: filePath, created: false };
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const token = randomBytes(32).toString("base64url");
+  const payload: RemoteAuthFile = {
+    version: 1,
+    token,
+    createdAt: nowIso()
+  };
+  await mkdir(rootDir ?? join(cwd, ".myagent", "remote"), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600
+  });
+  await chmod(filePath, 0o600).catch(() => undefined);
+  return { token, path: filePath, created: true };
+}
+
+function checkAuthHeader(request: IncomingMessage, expectedToken: string): boolean {
+  const header = request.headers["authorization"];
+  if (typeof header !== "string") {
+    return false;
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  if (!match) {
+    return false;
+  }
+  const provided = Buffer.from(match[1] ?? "", "utf8");
+  const expected = Buffer.from(expectedToken, "utf8");
+  if (provided.length !== expected.length) {
+    return false;
+  }
+  return timingSafeEqual(provided, expected);
+}
 
 export type RemoteAgentServer = {
   host: string;
@@ -234,6 +317,19 @@ export async function createRemoteAgentServer(
   });
 
   httpServer.on("upgrade", (request, socket) => {
+    if (!checkAuthHeader(request, options.authToken)) {
+      (socket as Socket).end(
+        [
+          "HTTP/1.1 401 Unauthorized",
+          "Content-Type: text/plain",
+          "Content-Length: 13",
+          "WWW-Authenticate: Bearer realm=\"myagent-remote\"",
+          "",
+          "Unauthorized\n"
+        ].join("\r\n")
+      );
+      return;
+    }
     const peer = acceptWebSocketUpgrade(request, socket as Socket);
     if (!peer) {
       return;
@@ -315,6 +411,7 @@ export async function connectRemoteClient(input: {
   host?: string;
   port: number;
   path?: string;
+  authToken?: string;
 }): Promise<RemoteClient> {
   const host = input.host ?? DEFAULT_REMOTE_HOST;
   const path = input.path ?? "/";
@@ -328,18 +425,19 @@ export async function connectRemoteClient(input: {
   });
 
   const key = randomBytes(16).toString("base64");
-  socket.write(
-    [
-      `GET ${path} HTTP/1.1`,
-      `Host: ${host}:${input.port}`,
-      "Upgrade: websocket",
-      "Connection: Upgrade",
-      `Sec-WebSocket-Key: ${key}`,
-      "Sec-WebSocket-Version: 13",
-      "",
-      ""
-    ].join("\r\n")
-  );
+  const headers = [
+    `GET ${path} HTTP/1.1`,
+    `Host: ${host}:${input.port}`,
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Key: ${key}`,
+    "Sec-WebSocket-Version: 13"
+  ];
+  if (input.authToken) {
+    headers.push(`Authorization: Bearer ${input.authToken}`);
+  }
+  headers.push("", "");
+  socket.write(headers.join("\r\n"));
 
   const remainder = await readHttpUpgrade(socket);
   const peer = createWebSocketPeer(socket, { maskOutgoing: true, initialBuffer: remainder });
