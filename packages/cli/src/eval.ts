@@ -463,7 +463,7 @@ function toolUseNames(events: readonly LoopEvent[]): string[] {
 
 function toolResultNotes(events: readonly LoopEvent[], task: EvalTask): string[] {
   // The permission task expects a tool_result error (the denied Write),
-  // so its validate() owns the semantics — don't flag errors here.
+  // so its validate() owns the semantics -- don't flag errors here.
   if (task.category === "permission") {
     return [];
   }
@@ -512,7 +512,7 @@ function renderEvalMarkdown(report: EvalSuiteReport): string {
     "## Notes",
     "",
     "Offline, deterministic. Token counts are scripted via FakeModel so the",
-    "cost column is a stable regression signal — a diff in tokens/turns means",
+    "cost column is a stable regression signal -- a diff in tokens/turns means",
     "the agent loop's behavior changed, not the model's."
   );
   return `${lines.join("\n")}\n`;
