@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
@@ -9,7 +8,9 @@ import {
   buildTool,
   collectQuery,
   createForkTrace,
+  createSpawnExecutor,
   startManagedTask,
+  type CommandExecutor,
   type JsonObjectSchema,
   type ToolCallResult,
   type ToolContext,
@@ -382,7 +383,13 @@ export function createBashTool(): ToolDefinition {
       const result =
         parsed.kind === "builtin"
           ? await runBuiltinCommand(parsed, context.cwd)
-          : await runSpawnedCommand(parsed, context.cwd, timeoutMs, context.abortSignal);
+          : await runSpawnedCommand(
+              parsed,
+              context.cwd,
+              timeoutMs,
+              context.abortSignal,
+              context.executor ?? createSpawnExecutor()
+            );
 
       return ok(formatBashResult(parsed.displayCommand, result));
     }
@@ -1143,69 +1150,36 @@ async function runSpawnedCommand(
   command: Extract<SafeBashCommand, { kind: "spawn" }>,
   cwd: string,
   timeoutMs: number,
-  abortSignal?: AbortSignal
+  abortSignal: AbortSignal | undefined,
+  executor: CommandExecutor
 ): Promise<CommandResult> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command.executable, command.args, {
+  try {
+    const { stdout, stderr, exitCode } = await executor.run({
+      command: command.executable,
+      args: command.args,
       cwd,
       shell: false,
-      windowsHide: true
+      windowsHide: true,
+      timeoutMs,
+      abortSignal,
+      outputSink: { kind: "capture", maxBytes: MAX_BASH_OUTPUT_CHARS }
     });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      abortSignal?.removeEventListener("abort", abort);
-    };
-
-    const finish = (callback: () => void) => {
-      if (settled) {
-        return;
+    return { stdout, stderr, exitCode };
+  } catch (error) {
+    // Preserve the previous error vocabulary so existing tests / users
+    // see the same messages: "Bash command aborted" / "... timed out".
+    if (error instanceof Error) {
+      if (error.message === "Command aborted") {
+        throw new Error("Bash command aborted");
       }
-      settled = true;
-      cleanup();
-      callback();
-    };
-
-    const abort = () => {
-      child.kill();
-      finish(() => reject(new Error("Bash command aborted")));
-    };
-
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(() => reject(new Error(`Bash command timed out after ${timeoutMs}ms`)));
-    }, timeoutMs);
-
-    if (abortSignal?.aborted) {
-      abort();
-      return;
+      if (error.message.startsWith("Command timed out after ")) {
+        throw new Error(`Bash command timed out after ${timeoutMs}ms`);
+      }
     }
-    abortSignal?.addEventListener("abort", abort, { once: true });
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout = capString(stdout + chunk.toString("utf8"), MAX_BASH_OUTPUT_CHARS);
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr = capString(stderr + chunk.toString("utf8"), MAX_BASH_OUTPUT_CHARS);
-    });
-    child.on("error", (error) => {
-      finish(() => reject(error));
-    });
-    child.on("close", (exitCode) => {
-      finish(() => resolvePromise({ stdout, stderr, exitCode }));
-    });
-  });
-}
-
-function capString(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
+    throw error;
   }
-  return `${value.slice(0, maxChars)}\n[output clipped at ${maxChars} chars]`;
 }
+
 
 function formatBashResult(command: string, result: CommandResult): string {
   const parts = [`$ ${command}`];

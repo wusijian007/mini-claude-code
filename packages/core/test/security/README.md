@@ -73,6 +73,19 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Command executor seam
+
+| Invariant | Test |
+|---|---|
+| `createSpawnExecutor` runs real commands and captures stdout | `packages/core/test/security/executor-seam.test.ts` |
+| `createSpawnExecutor` honors `abortSignal` and rejects with `Command aborted` | `packages/core/test/security/executor-seam.test.ts` |
+| `createSpawnExecutor` enforces `timeoutMs` and rejects with `timed out` | `packages/core/test/security/executor-seam.test.ts` |
+| `runLocalBashTask` routes spawned commands through the injected `CommandExecutor` (test injects a mock) | `packages/core/test/security/executor-seam.test.ts` |
+| Non-zero exit from the executor surfaces as `task.state = "failed"` | `packages/core/test/security/executor-seam.test.ts` |
+| Executor's `onPid` callback records the pid on the task record | `packages/core/test/security/executor-seam.test.ts` |
+| Bash *builtin* commands (pwd / ls / cat / find) stay in-process — the executor is NOT invoked for them | `packages/core/test/security/executor-seam.test.ts` |
+| Bash *spawn* commands (git / rg / grep) do route through the executor | `packages/core/test/security/executor-seam.test.ts` |
+
 ### Prompt caching plumbing
 
 | Invariant | Test |

@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { CommandExecutor } from "./executor.js";
 import type { ModelClient, ModelUsage, SystemTextBlock } from "./model.js";
 import type { ForkTrace } from "./fork.js";
 import type { ProfileRecorder } from "./profile.js";
@@ -82,6 +83,14 @@ export type ToolContext = {
   parentMessages?: readonly Message[];
   tools?: readonly ToolDefinition[];
   taskStore?: TaskStore;
+  /**
+   * Optional command executor for external (non-builtin) tool spawns.
+   * Defaults to `createSpawnExecutor()` (vanilla `child_process.spawn`)
+   * when absent. Tests inject mocks via this field to assert without
+   * touching real processes; a future sandbox runtime (Docker, etc.)
+   * plugs in here.
+   */
+  executor?: CommandExecutor;
   subAgentDepth?: number;
   maxSubAgentDepth?: number;
   recordForkTrace?: (trace: ForkTrace) => Promise<void> | void;

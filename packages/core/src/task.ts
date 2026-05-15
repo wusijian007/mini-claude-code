@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { createSpawnExecutor, type CommandExecutor } from "./executor.js";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -251,7 +251,11 @@ export async function startManagedTask(
   };
 }
 
-export async function runLocalBashTask(store: TaskStore, taskId: string): Promise<TaskRecord> {
+export async function runLocalBashTask(
+  store: TaskStore,
+  taskId: string,
+  executor: CommandExecutor = createSpawnExecutor()
+): Promise<TaskRecord> {
   let task = await store.load(taskId);
   if (task.type !== "local_bash") {
     return markTaskFailed(store, taskId, `Task ${taskId} is not a local_bash task`);
@@ -276,7 +280,7 @@ export async function runLocalBashTask(store: TaskStore, taskId: string): Promis
     const exitCode =
       parsed.kind === "builtin"
         ? await runBuiltinReadOnlyCommand(store, task, parsed)
-        : await runSpawnedReadOnlyCommand(store, task, parsed);
+        : await runSpawnedReadOnlyCommand(store, task, parsed, executor);
     const current = await store.load(taskId);
     if (current.state === "killed") {
       return current;
@@ -479,26 +483,26 @@ async function runBuiltinReadOnlyCommand(
 async function runSpawnedReadOnlyCommand(
   store: TaskStore,
   task: TaskRecord,
-  command: Extract<ReadOnlyBashCommand, { kind: "spawn" }>
+  command: Extract<ReadOnlyBashCommand, { kind: "spawn" }>,
+  executor: CommandExecutor
 ): Promise<number | null> {
   await store.appendOutput(task.id, `$ ${command.displayCommand}\n`);
   const output = await open(task.outputFile, "a");
   try {
-    const child = spawn(command.executable, command.args, {
+    const result = await executor.run({
+      command: command.executable,
+      args: command.args,
       cwd: task.cwd,
       shell: false,
       windowsHide: true,
-      stdio: ["ignore", output.fd, output.fd]
+      outputSink: { kind: "fd", fd: output.fd },
+      onPid: (pid) => {
+        // Fire-and-forget; per-task patch lock (createTaskStore) serializes
+        // this with any concurrent terminal-state patch from completion.
+        void store.patch(task.id, (record) => ({ ...record, pid }));
+      }
     });
-    await store.patch(task.id, (record) => ({
-      ...record,
-      pid: child.pid
-    }));
-
-    return await new Promise<number | null>((resolvePromise, reject) => {
-      child.on("error", reject);
-      child.on("close", (exitCode) => resolvePromise(exitCode));
-    });
+    return result.exitCode;
   } finally {
     await output.close();
     const info = await stat(task.outputFile).catch(() => null);
