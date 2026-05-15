@@ -27,6 +27,7 @@ import {
   createRemoteSessionStore,
   createProfileRecorder,
   createProfileStore,
+  createSpawnExecutor,
   ensureRemoteAuthToken,
   markTaskKilled,
   ModelError,
@@ -1551,6 +1552,7 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
         requestPermission: options.requestPermission,
         hookSnapshot,
         taskStore: createTaskStore(options.cwd, options.dependencies.taskRootDir),
+        executor: createSpawnExecutor(),
         maxSubAgentDepth: 1,
         recordForkTrace: (trace) => appendForkTrace(options.cwd, bootstrap.sessionId, trace)
       },

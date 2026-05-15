@@ -1,6 +1,7 @@
 export * from "./anthropic.js";
 export * from "./chat.js";
 export * from "./context.js";
+export * from "./executor.js";
 export * from "./fork.js";
 export * from "./hooks.js";
 export * from "./memory.js";
