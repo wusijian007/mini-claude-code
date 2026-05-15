@@ -74,6 +74,7 @@ import {
 } from "@mini-claude-code/tools";
 import { formatWeek12AuditReport, runWeek12Audit } from "./week12.js";
 import { formatWeek18FinalReport, runWeek18Final } from "./week18.js";
+import { formatEvalReport, runEvalSuite } from "./eval.js";
 
 const VERSION = "0.0.0";
 const DEFAULT_TOOL_RESULT_BUDGET_CHARS = 8_192;
@@ -91,6 +92,7 @@ Usage:
   myagent mcp <list|tools>
   myagent week12 audit
   myagent week18 finalize
+  myagent eval run
   myagent usage <sessionId>
   myagent profile <startup|list|show>
   myagent task <start-bash|list|read|kill|notify>
@@ -121,6 +123,7 @@ Week 18 scope:
   profile startup records fast-path and cold-path checkpoints under .myagent/profiles.
   usage <sessionId> renders a per-turn token + cost breakdown from the saved transcript.
   week18 finalize runs the final offline smoke suite and writes a portfolio report.
+  eval run executes the offline fixture-based agent regression suite (pass/turns/tokens/cost) under .myagent/evals.
   memory list shows editable long-term memory entries that will be recalled into future turns.
   resume <sessionId> prints a saved transcript, or continues it when a prompt is provided.
   resume <sessionId> --show-compactions lists every compaction event with its archive path.
@@ -251,6 +254,10 @@ export async function runCli(
 
   if (argv[0] === "week18") {
     return runWeek18(argv.slice(1), stdout, stderr, dependencies);
+  }
+
+  if (argv[0] === "eval") {
+    return runEval(argv.slice(1), stdout, stderr, dependencies);
   }
 
   if (argv[0] === "profile") {
@@ -494,6 +501,24 @@ async function runWeek18(
   const cwd = dependencies.cwd ?? process.cwd();
   const report = await runWeek18Final({ cwd });
   stdout.write(formatWeek18FinalReport(report));
+  return report.status === "passed" ? 0 : 1;
+}
+
+async function runEval(
+  args: readonly string[],
+  stdout: WritableLike,
+  stderr: WritableLike,
+  dependencies: CliDependencies
+): Promise<number> {
+  const [command] = args;
+  if (command !== "run") {
+    stderr.write("Usage: myagent eval run\n");
+    return 1;
+  }
+
+  const cwd = dependencies.cwd ?? process.cwd();
+  const report = await runEvalSuite({ cwd });
+  stdout.write(formatEvalReport(report));
   return report.status === "passed" ? 0 : 1;
 }
 

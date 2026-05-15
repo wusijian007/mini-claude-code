@@ -20,7 +20,9 @@ This is a Node 20+ TypeScript monorepo using npm workspaces and project referenc
 - Dev CLI (no build, via tsx): `npm.cmd run dev -- <args>`
 - Built CLI: `npm.cmd run myagent -- <args>` (requires `build` first)
 
-The CLI binary entry is `packages/cli/dist/index.js` (exposed as `myagent`). The full subcommand surface is documented by `myagent --help` — notable: `chat`, `agent`, `tui`, `memory`, `skill`, `mcp`, `task`, `remote`, `profile`, `resume`, `compact`, `week12 audit`, `week18 finalize`.
+The CLI binary entry is `packages/cli/dist/index.js` (exposed as `myagent`). The full subcommand surface is documented by `myagent --help` — notable: `chat`, `agent`, `tui`, `memory`, `skill`, `mcp`, `task`, `remote`, `profile`, `usage`, `resume`, `compact`, `week12 audit`, `week18 finalize`, `eval run`.
+
+`myagent eval run` is the offline fixture-based agent regression suite ([packages/cli/src/eval.ts](packages/cli/src/eval.ts)): 5 inline `EvalTask`s drive the real `query()` loop with deterministic `FakeModel` scripts (read-only analysis, safe edit, read-only Bash, plan-mode-blocks-Write permission enforcement, explore sub-agent). Token/cost numbers are deterministic because `FakeModelStep`'s `assistant_message` accepts an optional scripted `usage`; the suite reports pass/turns/in/out/cache/cost per task plus totals under `.myagent/evals/runs/<runId>/`. It is also a CI gate via `packages/cli/test/eval.test.ts` (asserts all pass + pins the metric fingerprint) — a behavior regression in the agent loop flips it red.
 
 ### Environment
 

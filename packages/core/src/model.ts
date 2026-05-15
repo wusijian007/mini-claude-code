@@ -120,6 +120,13 @@ export type FakeModelStep =
   | {
       type: "assistant_message";
       content: string;
+      /**
+       * Optional scripted token usage for this assistant turn. Lets
+       * offline tests (esp. the M2.3 eval suite) assert deterministic
+       * token / cost accounting without a live model. When omitted the
+       * stream event carries no usage, exactly as before.
+       */
+      usage?: ModelUsage;
     }
   | {
       type: "tool_use";
@@ -207,6 +214,7 @@ export class FakeModel implements ModelClient {
             role: "assistant",
             content: step.content
           },
+          ...(step.usage ? { usage: step.usage } : {}),
           requestId
         };
         continue;
