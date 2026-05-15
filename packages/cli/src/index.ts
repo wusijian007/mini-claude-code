@@ -128,6 +128,7 @@ Week 18 scope:
   Override the default model with MYAGENT_MODEL.
   Optional cost estimates use MYAGENT_INPUT_USD_PER_MTOK and MYAGENT_OUTPUT_USD_PER_MTOK.
   Prompt-cache cost: MYAGENT_CACHE_WRITE_USD_PER_MTOK (cache creation) and MYAGENT_CACHE_READ_USD_PER_MTOK (cache hit).
+  Per-stream idle timeout: MYAGENT_IDLE_TIMEOUT_MS (default 90000). Bump for slow gateways routing through extended-thinking models.
 
 Not yet implemented:
   richer custom rendering arrives in later weeks.
@@ -172,6 +173,7 @@ export type CliEnvironment = {
   MYAGENT_OUTPUT_USD_PER_MTOK?: string;
   MYAGENT_CACHE_WRITE_USD_PER_MTOK?: string;
   MYAGENT_CACHE_READ_USD_PER_MTOK?: string;
+  MYAGENT_IDLE_TIMEOUT_MS?: string;
 };
 
 export type CliDependencies = {
@@ -1766,7 +1768,8 @@ function readDotEnv(path: string): CliEnvironment {
       key === "MYAGENT_INPUT_USD_PER_MTOK" ||
       key === "MYAGENT_OUTPUT_USD_PER_MTOK" ||
       key === "MYAGENT_CACHE_WRITE_USD_PER_MTOK" ||
-      key === "MYAGENT_CACHE_READ_USD_PER_MTOK"
+      key === "MYAGENT_CACHE_READ_USD_PER_MTOK" ||
+      key === "MYAGENT_IDLE_TIMEOUT_MS"
     ) {
       env[key] = value;
       continue;

@@ -59,6 +59,13 @@ export type EnvironmentLike = {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_BASE_URL?: string;
   MYAGENT_MODEL?: string;
+  /**
+   * Per-stream idle timeout in milliseconds. If the model emits no
+   * events for this long the stream is aborted. Default 90_000.
+   * Bump this for proxies/gateways that route through extended-thinking
+   * models which can pause for minutes mid-stream.
+   */
+  MYAGENT_IDLE_TIMEOUT_MS?: string;
 };
 
 export class AnthropicModelClient implements ModelClient {
@@ -270,11 +277,24 @@ export function createAnthropicModelClientFromEnv(
     );
   }
 
+  const idleTimeoutMs = parseIdleTimeoutMs(env.MYAGENT_IDLE_TIMEOUT_MS);
   return new AnthropicModelClient({
     apiKey: env.ANTHROPIC_API_KEY,
     baseURL: env.ANTHROPIC_BASE_URL,
-    defaultModel: env.MYAGENT_MODEL ?? DEFAULT_MODEL
+    defaultModel: env.MYAGENT_MODEL ?? DEFAULT_MODEL,
+    idleTimeoutMs
   });
+}
+
+export function parseIdleTimeoutMs(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return Math.floor(parsed);
 }
 
 export function toAnthropicMessages(messages: readonly Message[]): AnthropicMessageParam[] {
