@@ -65,7 +65,7 @@ describe("myagent cli", () => {
     expect(stdout.text()).toContain("week18 finalize");
     expect(stdout.text()).toContain("profile <startup|list|show>");
     expect(stdout.text()).toContain("task <start-bash|list|read|kill|notify>");
-    expect(stdout.text()).toContain("remote <serve|sessions>");
+    expect(stdout.text()).toContain("remote <serve|sessions|client>");
     expect(stdout.text()).toContain("Agent sub-agents");
     expect(stdout.text()).toContain("fork traces");
     expect(stdout.text()).toContain("remote serve starts");
