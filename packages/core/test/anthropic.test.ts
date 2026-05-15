@@ -3,6 +3,7 @@ import {
   createAnthropicModelClientFromEnv,
   ModelError,
   normalizeAnthropicBaseURL,
+  parseIdleTimeoutMs,
   toAnthropicMessages
 } from "../src/index.js";
 
@@ -66,5 +67,37 @@ describe("Anthropic adapter", () => {
     expect(normalizeAnthropicBaseURL("https://api.anthropic.com/")).toBe(
       "https://api.anthropic.com"
     );
+  });
+
+  it("parses MYAGENT_IDLE_TIMEOUT_MS into a positive integer", () => {
+    expect(parseIdleTimeoutMs("300000")).toBe(300000);
+    expect(parseIdleTimeoutMs("60000.7")).toBe(60000);
+  });
+
+  it("rejects malformed or non-positive MYAGENT_IDLE_TIMEOUT_MS values", () => {
+    expect(parseIdleTimeoutMs(undefined)).toBeUndefined();
+    expect(parseIdleTimeoutMs("")).toBeUndefined();
+    expect(parseIdleTimeoutMs("   ")).toBeUndefined();
+    expect(parseIdleTimeoutMs("not-a-number")).toBeUndefined();
+    expect(parseIdleTimeoutMs("0")).toBeUndefined();
+    expect(parseIdleTimeoutMs("-5000")).toBeUndefined();
+  });
+
+  it("createAnthropicModelClientFromEnv accepts MYAGENT_IDLE_TIMEOUT_MS without throwing", () => {
+    expect(() =>
+      createAnthropicModelClientFromEnv({
+        ANTHROPIC_API_KEY: "sk-test",
+        ANTHROPIC_BASE_URL: "https://example.test/v1",
+        MYAGENT_IDLE_TIMEOUT_MS: "300000"
+      })
+    ).not.toThrow();
+    // A malformed value should not crash either — the client just falls
+    // back to the default (90s).
+    expect(() =>
+      createAnthropicModelClientFromEnv({
+        ANTHROPIC_API_KEY: "sk-test",
+        MYAGENT_IDLE_TIMEOUT_MS: "bogus"
+      })
+    ).not.toThrow();
   });
 });
