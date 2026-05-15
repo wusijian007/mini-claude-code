@@ -91,7 +91,15 @@ const AgentInputSchema = z
     description: z.string().trim().min(1),
     prompt: z.string().trim().min(1),
     subagent_type: z.enum(["general", "explore", "verifier"]).optional(),
-    model: z.string().trim().min(1).optional(),
+    // Empty / whitespace strings are silently normalized to undefined so
+    // the parent's model is inherited. LLMs reliably emit "", "default",
+    // "sonnet", etc. when they don't know what to put; the empty case is
+    // benign, the others fail loudly at the provider with model_not_found.
+    model: z
+      .string()
+      .trim()
+      .optional()
+      .transform((value) => (value === undefined || value === "" ? undefined : value)),
     run_in_background: z.boolean().optional()
   })
   .strict();
@@ -202,7 +210,12 @@ const AGENT_INPUT_JSON_SCHEMA: JsonObjectSchema = {
     },
     model: {
       type: "string",
-      description: "Optional model name override. Uses the same provider client."
+      description:
+        "OMIT this field unless you explicitly need a different model for the sub-agent. " +
+        "When set, must be an exact provider model ID such as 'claude-sonnet-4-6' or " +
+        "'claude-haiku-4-5-20251001'. Do NOT pass placeholders like 'default', " +
+        "'sonnet', 'claude', or an empty string — those either fail validation or fail at " +
+        "the provider with model_not_found. The sub-agent inherits the parent's model by default."
     },
     run_in_background: {
       type: "boolean",
