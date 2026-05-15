@@ -23,6 +23,7 @@ import {
   loadHookSnapshot,
   loadSkills,
   collectTaskNotifications,
+  connectRemoteClient,
   createRemoteAgentServer,
   createRemoteSessionStore,
   createProfileRecorder,
@@ -62,6 +63,7 @@ import {
   type ProfileRecorder,
   type RemoteTurnInput,
   type RemoteTurnSink,
+  type RemoteServerMessage,
   type ToolDefinition
 } from "@mini-claude-code/core";
 import {
@@ -92,7 +94,7 @@ Usage:
   myagent usage <sessionId>
   myagent profile <startup|list|show>
   myagent task <start-bash|list|read|kill|notify>
-  myagent remote <serve|sessions>
+  myagent remote <serve|sessions|client>
   myagent resume <sessionId> [prompt]
   myagent compact <sessionId>
   myagent /compact <sessionId>
@@ -113,6 +115,8 @@ Week 18 scope:
   fork traces record stable system/tool/prefix hashes for cache debugging.
   remote serve starts a local-only WebSocket endpoint for browser or local clients.
   remote serve generates .myagent/remote/auth.json on first run; clients must send Authorization: Bearer <token>.
+  remote serve grants the first connection owner rights; later connections are read-only followers that watch the stream.
+  remote client [--url ws://host:port] [--token <t>] [--prompt "<p>"] [--session <id>] connects, streams, and answers permission prompts on the local TTY.
   remote writes require client UUIDs for dedupe; metadata supports detach/resume.
   profile startup records fast-path and cold-path checkpoints under .myagent/profiles.
   usage <sessionId> renders a per-turn token + cost breakdown from the saved transcript.
@@ -769,8 +773,14 @@ async function runRemote(
     return 0;
   }
 
+  if (command === "client") {
+    return runRemoteClient(rest, stdout, stderr, dependencies);
+  }
+
   if (command !== "serve") {
-    stderr.write("Usage: myagent remote <serve|sessions> [--host <host>] [--port <port>]\n");
+    stderr.write(
+      "Usage: myagent remote <serve|sessions|client> [--host <host>] [--port <port>]\n"
+    );
     return 1;
   }
 
@@ -882,6 +892,224 @@ function parseRemoteServeArgs(args: readonly string[]): ParsedRemoteServeArgs {
   }
 
   return { ok: true, host, port };
+}
+
+type ParsedRemoteClientArgs =
+  | {
+      ok: true;
+      host: string;
+      port: number;
+      path: string;
+      token?: string;
+      prompt?: string;
+      sessionId?: string;
+    }
+  | { ok: false; error: string };
+
+function parseRemoteClientArgs(args: readonly string[]): ParsedRemoteClientArgs {
+  let host: string | undefined;
+  let port: number | undefined;
+  let path = "/";
+  let token: string | undefined;
+  let prompt: string | undefined;
+  let sessionId: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const value = args[index + 1];
+    if (arg === "--url") {
+      if (!value) return { ok: false, error: "Missing value for --url" };
+      try {
+        const url = new URL(value);
+        host = url.hostname;
+        port = url.port ? Number(url.port) : url.protocol === "wss:" ? 443 : 80;
+        path = url.pathname && url.pathname !== "" ? url.pathname : "/";
+      } catch {
+        return { ok: false, error: `Invalid --url: ${value}` };
+      }
+      index += 1;
+      continue;
+    }
+    if (arg === "--host") {
+      if (!value) return { ok: false, error: "Missing value for --host" };
+      host = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--port") {
+      const parsed = Number(value);
+      if (!value || !Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+        return { ok: false, error: "Invalid --port value" };
+      }
+      port = parsed;
+      index += 1;
+      continue;
+    }
+    if (arg === "--token") {
+      if (!value) return { ok: false, error: "Missing value for --token" };
+      token = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--prompt") {
+      if (!value) return { ok: false, error: "Missing value for --prompt" };
+      prompt = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--session") {
+      if (!value) return { ok: false, error: "Missing value for --session" };
+      sessionId = value;
+      index += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown remote client option: ${arg}` };
+  }
+
+  return {
+    ok: true,
+    host: host ?? "127.0.0.1",
+    port: port ?? 8765,
+    path,
+    token,
+    prompt,
+    sessionId
+  };
+}
+
+async function runRemoteClient(
+  args: readonly string[],
+  stdout: WritableLike,
+  stderr: WritableLike,
+  dependencies: CliDependencies
+): Promise<number> {
+  const parsed = parseRemoteClientArgs(args);
+  if (!parsed.ok) {
+    stderr.write(
+      `${parsed.error}\nUsage: myagent remote client [--url ws://host:port] [--token <t>] [--prompt "<p>"] [--session <id>]\n`
+    );
+    return 1;
+  }
+
+  const cwd = dependencies.cwd ?? process.cwd();
+  // Token resolution: explicit --token wins; otherwise fall back to the
+  // local auth file (only meaningful when the server runs on this host).
+  let token = parsed.token;
+  if (!token) {
+    const authPath = join(
+      dependencies.remoteAuthRootDir ?? join(cwd, ".myagent", "remote"),
+      "auth.json"
+    );
+    try {
+      const raw = readFileSync(authPath, "utf8");
+      const fileToken = (JSON.parse(raw) as { token?: unknown }).token;
+      if (typeof fileToken === "string" && fileToken.length > 0) {
+        token = fileToken;
+      }
+    } catch {
+      // No local auth file; the server will reject without a token.
+    }
+  }
+
+  let client;
+  try {
+    client = await connectRemoteClient({
+      host: parsed.host,
+      port: parsed.port,
+      path: parsed.path,
+      authToken: token
+    });
+  } catch (error) {
+    stderr.write(
+      `Could not connect to ws://${parsed.host}:${parsed.port}${parsed.path}: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`
+    );
+    return 1;
+  }
+
+  const promptSession = createPromptSession(dependencies, stdout);
+  let exitCode = 0;
+  try {
+    while (true) {
+      const message: RemoteServerMessage = await client.nextMessage();
+      if (message.type === "ready") {
+        continue;
+      }
+      if (message.type === "role") {
+        stdout.write(`[remote] connected as ${message.role}\n`);
+        if (parsed.prompt && message.role === "follower") {
+          stdout.write(
+            "[remote] note: this connection is a read-only follower; --prompt will be rejected by the server\n"
+          );
+        }
+        if (parsed.prompt) {
+          client.send({
+            type: "user_message",
+            id: `cli_${Date.now()}`,
+            prompt: parsed.prompt,
+            sessionId: parsed.sessionId
+          });
+        } else {
+          stdout.write("[remote] watching stream (Ctrl+C to exit)\n");
+        }
+        continue;
+      }
+      if (message.type === "agent_stdout") {
+        stdout.write(message.chunk);
+        continue;
+      }
+      if (message.type === "agent_stderr") {
+        stderr.write(message.chunk);
+        continue;
+      }
+      if (message.type === "permission_request") {
+        const decision = await requestPermissionFromPrompt(
+          message.request,
+          promptSession.ask,
+          stdout
+        );
+        client.send({
+          type: "permission_decision",
+          id: `cli_perm_${Date.now()}`,
+          permissionRequestId: message.permissionRequestId,
+          decision
+        });
+        continue;
+      }
+      if (message.type === "session_metadata") {
+        stdout.write(
+          `[remote] session ${message.session.sessionId} state=${message.session.state}\n`
+        );
+        continue;
+      }
+      if (message.type === "terminal_state") {
+        stdout.write(
+          `[remote] turn finished: exitCode=${message.exitCode} agentSession=${
+            message.agentSessionId ?? "?"
+          }\n`
+        );
+        exitCode = message.exitCode === 0 ? 0 : 1;
+        if (parsed.prompt) {
+          break;
+        }
+        continue;
+      }
+      if (message.type === "error") {
+        stderr.write(`[remote] error: ${message.message}\n`);
+        if (parsed.prompt) {
+          exitCode = 1;
+          break;
+        }
+        continue;
+      }
+      // ack / pong — informational, ignore in the CLI client.
+    }
+  } finally {
+    promptSession.close();
+    client.close();
+  }
+  return exitCode;
 }
 
 async function waitForShutdownSignal(): Promise<void> {

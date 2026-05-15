@@ -38,10 +38,16 @@ export type RemoteClientMessage =
       id: string;
     };
 
+export type RemoteRole = "owner" | "follower";
+
 export type RemoteServerMessage =
   | {
       type: "ready";
       protocolVersion: 1;
+    }
+  | {
+      type: "role";
+      role: RemoteRole;
     }
   | {
       type: "ack";
@@ -304,6 +310,21 @@ export async function createRemoteAgentServer(
   const pendingPermissions = new Map<string, PendingPermission>();
   const runningTurns = new Set<AbortController>();
   const sockets = new Set<Socket>();
+  // All live authenticated connections, keyed by connectionId. Used to
+  // fan turn output out to followers so they can watch the owner's run.
+  const connections = new Map<string, (message: RemoteServerMessage) => void>();
+  // The first authenticated connection becomes the owner and is the only
+  // one allowed to drive turns / answer permission prompts. When the
+  // owner disconnects the slot is released; the next NEW connection
+  // claims it (existing followers are not auto-promoted — keeps the
+  // ownership transition race-free and predictable).
+  let ownerConnectionId: string | undefined;
+
+  const broadcast = (message: RemoteServerMessage) => {
+    for (const deliver of connections.values()) {
+      deliver(message);
+    }
+  };
 
   const httpServer = createServer((_request, response) => {
     response.writeHead(404);
@@ -338,10 +359,20 @@ export async function createRemoteAgentServer(
     const controller = new AbortController();
     const connectionId = randomUUID();
     const send = (message: RemoteServerMessage) => peer.sendJson(message);
+    connections.set(connectionId, send);
+    const isOwner = ownerConnectionId === undefined;
+    if (isOwner) {
+      ownerConnectionId = connectionId;
+    }
     send({ type: "ready", protocolVersion: REMOTE_PROTOCOL_VERSION });
+    send({ type: "role", role: isOwner ? "owner" : "follower" });
 
     peer.onClose(() => {
       controller.abort();
+      connections.delete(connectionId);
+      if (ownerConnectionId === connectionId) {
+        ownerConnectionId = undefined;
+      }
       for (const [permissionId, pending] of pendingPermissions) {
         if (pending.requestId.startsWith(`${connectionId}:`)) {
           pendingPermissions.delete(permissionId);
@@ -359,6 +390,8 @@ export async function createRemoteAgentServer(
         pendingPermissions,
         runningTurns,
         send,
+        broadcast,
+        isOwner: () => ownerConnectionId === connectionId,
         store
       });
     });
@@ -498,18 +531,22 @@ export function formatRemoteSessionList(sessions: readonly RemoteSessionMetadata
   return `${lines.join("\n")}\n`;
 }
 
+type HandleRemoteMessageContext = {
+  controller: AbortController;
+  connectionId: string;
+  options: RemoteAgentServerOptions;
+  peer: WebSocketPeer;
+  pendingPermissions: Map<string, PendingPermission>;
+  runningTurns: Set<AbortController>;
+  send(message: RemoteServerMessage): void;
+  broadcast(message: RemoteServerMessage): void;
+  isOwner(): boolean;
+  store: RemoteSessionStore;
+};
+
 async function handleRemoteMessage(
   raw: string,
-  context: {
-    controller: AbortController;
-    connectionId: string;
-    options: RemoteAgentServerOptions;
-    peer: WebSocketPeer;
-    pendingPermissions: Map<string, PendingPermission>;
-    runningTurns: Set<AbortController>;
-    send(message: RemoteServerMessage): void;
-    store: RemoteSessionStore;
-  }
+  context: HandleRemoteMessageContext
 ): Promise<void> {
   let message: RemoteClientMessage;
   try {
@@ -521,6 +558,21 @@ async function handleRemoteMessage(
 
   if (message.type === "ping") {
     context.send({ type: "pong", id: message.id });
+    return;
+  }
+
+  // Owner-only gate: a read-only follower may watch the stream and read
+  // session metadata, but cannot drive turns or answer permission prompts.
+  if (
+    (message.type === "user_message" || message.type === "permission_decision") &&
+    !context.isOwner()
+  ) {
+    context.send({
+      type: "error",
+      id: message.id,
+      message:
+        "read-only follower: only the session owner can submit prompts or answer permission requests"
+    });
     return;
   }
 
@@ -586,6 +638,7 @@ async function handleUserMessage(
     pendingPermissions: Map<string, PendingPermission>;
     runningTurns: Set<AbortController>;
     send(message: RemoteServerMessage): void;
+    broadcast(message: RemoteServerMessage): void;
     store: RemoteSessionStore;
   }
 ): Promise<void> {
@@ -610,7 +663,7 @@ async function handleUserMessage(
 
   if (metadata.writeIds.includes(message.id)) {
     context.send({ type: "ack", id: message.id, sessionId: metadata.sessionId, duplicate: true });
-    context.send({ type: "session_metadata", session: metadata });
+    context.broadcast({ type: "session_metadata", session: metadata });
     return;
   }
 
@@ -623,7 +676,7 @@ async function handleUserMessage(
   };
   await context.store.save(metadata);
   context.send({ type: "ack", id: message.id, sessionId: metadata.sessionId, duplicate: false });
-  context.send({ type: "session_metadata", session: metadata });
+  context.broadcast({ type: "session_metadata", session: metadata });
 
   const turnController = new AbortController();
   context.runningTurns.add(turnController);
@@ -642,16 +695,16 @@ async function handleUserMessage(
       },
       {
         signal: turnController.signal,
-        send: context.send,
+        send: context.broadcast,
         writeStdout(chunk) {
-          context.send({ type: "agent_stdout", id: message.id, chunk });
+          context.broadcast({ type: "agent_stdout", id: message.id, chunk });
         },
         writeStderr(chunk) {
-          context.send({ type: "agent_stderr", id: message.id, chunk });
+          context.broadcast({ type: "agent_stderr", id: message.id, chunk });
         },
         requestPermission(request) {
           const permissionRequestId = `perm_${randomUUID()}`;
-          context.send({
+          context.broadcast({
             type: "permission_request",
             id: message.id,
             permissionRequestId,
@@ -674,14 +727,14 @@ async function handleUserMessage(
       lastError: undefined
     };
     await context.store.save(metadata);
-    context.send({
+    context.broadcast({
       type: "terminal_state",
       id: message.id,
       sessionId: metadata.sessionId,
       agentSessionId: result.sessionId,
       exitCode: result.exitCode
     });
-    context.send({ type: "session_metadata", session: metadata });
+    context.broadcast({ type: "session_metadata", session: metadata });
   } catch (error) {
     metadata = {
       ...metadata,
@@ -690,8 +743,8 @@ async function handleUserMessage(
       lastError: error instanceof Error ? error.message : String(error)
     };
     await context.store.save(metadata);
-    context.send({ type: "error", id: message.id, message: metadata.lastError ?? "remote turn failed" });
-    context.send({ type: "session_metadata", session: metadata });
+    context.broadcast({ type: "error", id: message.id, message: metadata.lastError ?? "remote turn failed" });
+    context.broadcast({ type: "session_metadata", session: metadata });
   } finally {
     context.controller.signal.removeEventListener("abort", abortTurn);
     context.runningTurns.delete(turnController);

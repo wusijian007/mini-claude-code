@@ -73,6 +73,17 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Remote session ownership
+
+| Invariant | Test |
+|---|---|
+| First authenticated connection is `owner`, subsequent ones are `follower` (server emits a `role` message) | `packages/core/test/security/remote-ownership.test.ts` |
+| A follower's `user_message` is rejected with a read-only error; the owner's is accepted | `packages/core/test/security/remote-ownership.test.ts` |
+| A follower's `permission_decision` is rejected | `packages/core/test/security/remote-ownership.test.ts` |
+| The owner's turn stream (stdout / terminal_state) is broadcast to connected followers | `packages/core/test/security/remote-ownership.test.ts` |
+| After the owner disconnects, the next NEW connection is promoted to owner | `packages/core/test/security/remote-ownership.test.ts` |
+| An existing follower is NOT auto-promoted when the owner leaves (race-free transition) | `packages/core/test/security/remote-ownership.test.ts` |
+
 ### Command executor seam
 
 | Invariant | Test |
