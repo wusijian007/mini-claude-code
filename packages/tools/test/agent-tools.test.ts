@@ -205,6 +205,65 @@ describe("Agent tool", () => {
     expect(() => readFileSync(join(cwd, "src", "created.ts"), "utf8")).toThrow();
   });
 
+  it.each([
+    ["empty string", ""],
+    ["whitespace only", "   "],
+    ["just tabs and newlines", "\t\n"]
+  ])("accepts model=%s by treating it as omitted (LLMs guess these for unknown overrides)", async (_label, modelValue) => {
+    const cwd = fixtureProject();
+    const tools = createProjectToolRegistry();
+    const result = await executeToolUse(
+      {
+        id: "toolu_agent_model_empty",
+        name: "Agent",
+        input: {
+          description: "empty-model probe",
+          prompt: "Find target.ts",
+          subagent_type: "explore",
+          model: modelValue
+        }
+      },
+      new Map(tools.map((tool) => [tool.name, tool])),
+      {
+        cwd,
+        model: new FakeModel([{ type: "assistant_message", content: "found it" }]),
+        tools
+      }
+    );
+
+    // The fix is that schema validation no longer rejects empty/whitespace
+    // model strings — the sub-agent runs and the model field is silently
+    // dropped. Before this change, the tool returned status=error with
+    // a "String must contain at least 1 character" zod message.
+    expect(result.status).toBe("success");
+    expect(result).not.toMatchObject({ error: expect.stringContaining("String must contain") });
+  });
+
+  it("still accepts a real model id override", async () => {
+    const cwd = fixtureProject();
+    const tools = createProjectToolRegistry();
+    const result = await executeToolUse(
+      {
+        id: "toolu_agent_model_real",
+        name: "Agent",
+        input: {
+          description: "real-model probe",
+          prompt: "Find target.ts",
+          subagent_type: "explore",
+          model: "claude-sonnet-4-6"
+        }
+      },
+      new Map(tools.map((tool) => [tool.name, tool])),
+      {
+        cwd,
+        model: new FakeModel([{ type: "assistant_message", content: "ok" }]),
+        tools
+      }
+    );
+
+    expect(result.status).toBe("success");
+  });
+
   it("keeps Agent in child tools while enforcing a recursive fork guard", async () => {
     const cwd = fixtureProject();
     const tools = createProjectToolRegistry();
