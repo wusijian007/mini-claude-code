@@ -73,6 +73,16 @@ Tests live in two trees because of the package boundary
 | `executeToolBatch` never overlaps two non-concurrency-safe tools | `packages/core/test/security/scheduler-write-serialization.test.ts` |
 | Sibling read tools cancel when a Bash sibling errors with cancel-on-error | `packages/core/test/scheduler.test.ts` |
 
+### Eval regression suite (M2.3)
+
+| Invariant | Test |
+|---|---|
+| The offline eval suite runs all 5 fixture tasks through the real query loop and every one passes | `packages/cli/test/eval.test.ts` |
+| Per-task metrics are deterministic (turns + scripted token totals + reproducible cost) | `packages/cli/test/eval.test.ts` |
+| The permission task actually denies a plan-mode Write (no leaked file) — a real permission regression flips it red | `packages/cli/test/eval.test.ts` |
+| `formatEvalReport` renders a stable `[eval] passed` summary | `packages/cli/test/eval.test.ts` |
+| `FakeModel` carries scripted `usage` on the assistant_message event; omitting it stays back-compat (no usage) | `packages/core/test/fake-model-usage.test.ts` |
+
 ### Remote session ownership
 
 | Invariant | Test |
