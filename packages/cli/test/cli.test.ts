@@ -654,6 +654,8 @@ describe("myagent cli", () => {
     expect(out).toMatch(/\$0\.0026/);
     // Totals row
     expect(out).toMatch(/total[\s\S]*1300[\s\S]*300[\s\S]*500[\s\S]*500/);
+    // M3.1b cache hit ratio: cache_read 500 / (cache_read 500 + input 1300) = 27.8%
+    expect(out).toContain("cache hit ratio: 27.8%");
   });
 
   it("reports a clear error when myagent usage is given a missing session id", async () => {

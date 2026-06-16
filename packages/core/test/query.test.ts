@@ -163,6 +163,33 @@ describe("query loop", () => {
     });
   });
 
+  it("sets cacheConversation on every model request (M3.1a)", async () => {
+    const flags: Array<boolean | undefined> = [];
+    const model = {
+      async create() {
+        throw new Error("not used");
+      },
+      async *stream(request) {
+        flags.push(request.cacheConversation);
+        yield {
+          type: "assistant_message",
+          message: { role: "assistant", content: "done" }
+        };
+      }
+    } satisfies ModelClient;
+
+    await collectQuery({
+      model,
+      initialMessages: [{ role: "user", content: "hi" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      maxTurns: 3
+    });
+
+    expect(flags.length).toBeGreaterThan(0);
+    expect(flags.every((f) => f === true)).toBe(true);
+  });
+
   it("stops before model work when already aborted", async () => {
     const controller = new AbortController();
     controller.abort();

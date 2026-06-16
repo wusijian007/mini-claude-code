@@ -56,14 +56,14 @@ v1/v2 的里程碑彼此独立，"commit message 即 spec" 足够。v3 不同—
 - **断点规则：滚动到前缀末尾。** 每轮给发出去的最后一条消息打 `cache_control: ephemeral`。下一轮请求是本轮的严格扩展 → 命中 Anthropic 增量缓存。配合现有 system + tools 两个断点，共 3 个，在 4 上限内。
 - **本轮范围：M3.1a 断点 + M3.1b 命中率遥测。** M3.1c（主循环 fork-trace 归因，解释"为何 miss"）后置到做 §1 时再加——那时才真正需要它报警"压缩炸了缓存"。
 
-### M3.1a — 消息前缀缓存断点
+### M3.1a — 消息前缀缓存断点 ✅ 已交付（PR #17）
 
 - `ModelRequest` 加 `cacheConversation?: boolean`（agent 路径开，chat 路径不开）。
 - `toAnthropicMessages` 接受"标记最后一条消息末块"的选项，给它加 `cache_control`。
 - query 循环透传 `cacheConversation: true`。
 - 测试：用捕获请求体的 fake Anthropic client 断言断点落在正确消息块（照搬 `packages/core/test/security/prompt-caching.test.ts` 的 `toAnthropicTools`/`toModelUsage` 单测套路）。
 
-### M3.1b — 缓存命中率遥测
+### M3.1b — 缓存命中率遥测 ✅ 已交付（PR #17）
 
 - `myagent usage` 加命中率行 `cache_read / (cache_read + input)`，会话级 + 每轮（token 已由 M1.5a 采集，纯渲染层）。
 - `myagent eval run` 报告同步加命中率列。

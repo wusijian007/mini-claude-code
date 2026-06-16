@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  toAnthropicMessages,
   toAnthropicTools,
   toModelUsage,
+  type Message,
   type ModelToolDefinition
 } from "../../src/index.js";
+
+function lastBlockOf(content: unknown): Record<string, unknown> {
+  if (!Array.isArray(content)) {
+    throw new Error("expected a block array (cache_control requires block form)");
+  }
+  return content[content.length - 1] as Record<string, unknown>;
+}
 
 function makeTool(name: string): ModelToolDefinition {
   return {
@@ -69,5 +78,61 @@ describe("security: prompt caching wiring", () => {
 
   it("toModelUsage returns undefined when the SDK provides no usage block", () => {
     expect(toModelUsage(undefined)).toBeUndefined();
+  });
+
+  // ---- M3.1a: message-prefix cache breakpoint ----
+
+  const convo: Message[] = [
+    { role: "user", content: "first" },
+    { role: "assistant", content: [{ type: "text", text: "reply" }] },
+    { role: "user", content: "latest" }
+  ];
+
+  it("toAnthropicMessages adds NO cache_control by default (back-compat / chat path)", () => {
+    const out = toAnthropicMessages(convo);
+    // Last message keeps its plain string content, no breakpoint anywhere.
+    expect(out[out.length - 1].content).toBe("latest");
+    for (const m of out) {
+      if (Array.isArray(m.content)) {
+        for (const block of m.content) {
+          expect(block).not.toHaveProperty("cache_control");
+        }
+      }
+    }
+  });
+
+  it("cacheLastMessage marks the last block of the LAST message only", () => {
+    const out = toAnthropicMessages(convo, { cacheLastMessage: true });
+    // The trailing string message is normalized to a text block carrying the marker.
+    const lastBlock = lastBlockOf(out[out.length - 1].content);
+    expect(lastBlock).toMatchObject({
+      type: "text",
+      text: "latest",
+      cache_control: { type: "ephemeral" }
+    });
+    // Earlier messages are untouched.
+    expect(out[0].content).toBe("first");
+    const midBlock = lastBlockOf(out[1].content);
+    expect(midBlock).not.toHaveProperty("cache_control");
+  });
+
+  it("cacheLastMessage attaches to the last block when the last message is already block-form", () => {
+    const blocky: Message[] = [
+      { role: "user", content: "q" },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", result: { toolUseId: "t1", status: "success", content: "ok" } }
+        ]
+      }
+    ];
+    const out = toAnthropicMessages(blocky, { cacheLastMessage: true });
+    const lastBlock = lastBlockOf(out[out.length - 1].content);
+    expect(lastBlock.type).toBe("tool_result");
+    expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("cacheLastMessage is a no-op on an empty message list", () => {
+    expect(toAnthropicMessages([], { cacheLastMessage: true })).toEqual([]);
   });
 });

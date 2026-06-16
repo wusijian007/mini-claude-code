@@ -182,10 +182,19 @@ export function formatEvalReport(report: EvalSuiteReport): string {
     `totals: tasks=${tot.taskCount} passed=${tot.passedCount} turns=${tot.turns} ` +
       `in=${tot.inputTokens} out=${tot.outputTokens} ` +
       `cache_w=${tot.cacheCreationInputTokens} cache_r=${tot.cacheReadInputTokens} ` +
-      `cost=$${tot.costUsd.toFixed(4)}`
+      `cost=$${tot.costUsd.toFixed(4)} cache_hit=${cacheHitRatio(tot.cacheReadInputTokens, tot.inputTokens)}`
   );
   lines.push(`report: ${report.reportPath}`);
   return `${lines.join("\n")}\n`;
+}
+
+// Share of input tokens served from prompt cache. "n/a" when no input yet.
+function cacheHitRatio(cacheRead: number, input: number): string {
+  const denom = cacheRead + input;
+  if (denom <= 0) {
+    return "n/a";
+  }
+  return `${((cacheRead / denom) * 100).toFixed(1)}%`;
 }
 
 function computeMetrics(events: readonly LoopEvent[]): EvalTaskMetrics {
@@ -498,6 +507,11 @@ function renderEvalMarkdown(report: EvalSuiteReport): string {
   const tot = report.totals;
   lines.push(
     `| **total** | (${tot.taskCount} tasks) | ${tot.passedCount}/${tot.taskCount} | ${tot.turns} | ${tot.inputTokens} | ${tot.outputTokens} | ${tot.cacheCreationInputTokens} | ${tot.cacheReadInputTokens} | $${tot.costUsd.toFixed(4)} |`
+  );
+  lines.push(
+    "",
+    `Cache hit ratio: ${cacheHitRatio(tot.cacheReadInputTokens, tot.inputTokens)} ` +
+      `(cache_read ${tot.cacheReadInputTokens} / [cache_read + in] ${tot.cacheReadInputTokens + tot.inputTokens})`
   );
   lines.push("");
   const failed = report.tasks.filter((t) => !t.passed);
