@@ -1,5 +1,6 @@
 import {
   compactMessages,
+  compactMessagesTiered,
   estimateMessagesTokens
 } from "./context.js";
 import {
@@ -45,6 +46,18 @@ export type QueryOptions = {
   profile?: ProfileRecorder;
   finalizeBeforeMaxTurns?: boolean;
   finalResponsePrompt?: string;
+  /**
+   * M3.2b — proactive compaction. When the running transcript estimate
+   * crosses `proactiveCompactionSoftLimitRatio * contextBudgetTokens` at a
+   * turn boundary, compact (tiered) down to
+   * `proactiveCompactionTargetRatio * contextBudgetTokens` BEFORE the next
+   * request — instead of waiting for the API to reject an oversized prompt.
+   * Compacting well below the soft limit maximizes turns-between-compactions
+   * (each compaction is one cache miss; see docs/v3-kernel-roadmap.md §1).
+   * Set the soft-limit ratio to 0 to disable (reactive path still applies).
+   */
+  proactiveCompactionSoftLimitRatio?: number;
+  proactiveCompactionTargetRatio?: number;
 };
 
 const DEFAULT_MAX_TURNS = 10;
@@ -78,6 +91,11 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
   };
   const modelName = options.modelName ?? DEFAULT_MODEL;
   const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const contextBudgetTokens = options.contextBudgetTokens ?? DEFAULT_CONTEXT_BUDGET_TOKENS;
+  const proactiveSoftLimitRatio = options.proactiveCompactionSoftLimitRatio ?? 0.75;
+  const proactiveTargetRatio = options.proactiveCompactionTargetRatio ?? 0.5;
+  const proactiveSoftLimit = Math.floor(contextBudgetTokens * proactiveSoftLimitRatio);
+  const proactiveTarget = Math.floor(contextBudgetTokens * proactiveTargetRatio);
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -221,6 +239,41 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
         role: "tool",
         content: results.map((result) => ({ type: "tool_result", result }))
       });
+
+      // M3.2b — proactive compaction at the turn boundary. Compacting here
+      // (before the next request) avoids paying for an oversized request that
+      // the API rejects, and lets us compact aggressively (down to the target
+      // ratio) so this doesn't re-trigger next turn.
+      if (proactiveSoftLimitRatio > 0) {
+        const beforeTokens = estimateMessagesTokens(messages);
+        if (beforeTokens > proactiveSoftLimit) {
+          const compacted = compactMessagesTiered(messages, { targetTokens: proactiveTarget });
+          const afterTokens = estimateMessagesTokens(compacted);
+          if (afterTokens < beforeTokens) {
+            messages.splice(0, messages.length, ...compacted);
+            // M3.1c — within a single run, the ONLY event that invalidates the
+            // rolling message-prefix cache (M3.1a) is a compaction: it rewrites
+            // stale messages, so the next request's prefix diverges from the
+            // cached one. A normal turn merely appends and keeps hitting the
+            // cache. (Per-turn fork-trace would mislabel every appended turn as
+            // a prefix miss, since fork.ts hashes the whole list — so we mark
+            // only the real reset event here.)
+            options.profile?.mark("query.cache_prefix_reset", {
+              turn,
+              beforeTokens,
+              afterTokens,
+              reason: "proactive_compaction"
+            });
+            yield {
+              type: "compaction",
+              reason: "proactive",
+              beforeTokens,
+              afterTokens,
+              turn
+            };
+          }
+        }
+      }
     }
 
     yield {

@@ -1903,6 +1903,12 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
         );
       }
 
+      if (event.type === "compaction") {
+        options.stdout.write(
+          `\n[compaction] ${event.reason}: ~${event.beforeTokens} -> ~${event.afterTokens} estimated tokens (turn ${event.turn})\n`
+        );
+      }
+
       if (event.type === "terminal_state" && event.state.status !== "completed") {
         await sessionStore.append(
           bootstrap.sessionId,

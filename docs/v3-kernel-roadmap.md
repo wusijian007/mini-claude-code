@@ -74,6 +74,52 @@ v1/v2 的里程碑彼此独立，"commit message 即 spec" 足够。v3 不同—
 - 主循环每轮记一条 fork-trace，`cacheMissSources`（`fork.ts:compareForkTraces` 已能区分 system_prompt/tools/message_prefix/child_directive/model）告诉你这轮为何 miss。
 - 做 §1 压缩时再加：它能立刻报警"压缩这轮炸了 message_prefix 缓存"。
 
+## §1 智能压缩 — 设计草案（M3.2） ✅ M3.2a/b + M3.1c 已交付（PR #18）
+
+> 中等爆炸半径（碰缓存 + 可能引入非确定性），按分级规则动手前先写这一节。
+> 交付偏差：M3.1c 从"逐轮 fork-trace"缩为"压缩时记一个 profile mark"——因为 fork.ts 的 prefixHash 是整列表哈希，每轮 append 都变，会把正常追加误标成 prefix miss；单次 run 内真正使缓存失效的只有压缩，已由 compaction 事件 + profile mark `query.cache_prefix_reset` 标记。M3.2c（LLM 摘要器）仍后置。
+
+### 核心张力：相关性 vs 缓存（决定整个设计）
+
+- **相关性**想保留"近期"、丢"旧的"。
+- **缓存**想保留"旧前缀"、丢"近期"——因为丢旧消息 = 在前缀靠前处改动 = 几乎全 miss。
+
+**解法**：压缩是一次性、摊销的**缓存重置点**。接受压缩那一轮全 miss，压缩后的新前缀成为之后许多轮的缓存基底。因此 invariant #1 的实操含义是：**压缩别太频繁（每次 = 一次 miss），且压完要狠（降到远低于触发阈值），最大化两次压缩之间的轮数**——这样摊销下来缓存命中率反而最高。每次压缩的代价现在可由 M3.1b 命中率（+ M3.1c 归因）观测。
+
+### M3.2a — 分层确定性压缩（默认，纯确定性）
+
+把哑截断（保留首1+尾6+snip）升级为**按块类型分层**的外科式压缩：
+
+- **根任务**（首条 user 消息）—— 永不丢。
+- **陈旧 tool_result**（近期窗口之外的）—— 内容换成**指针**：`[archived tool_result: Read src/x.ts (412 lines) -> <archivePath>]`。文件还在盘上、可重读，这是最大的"鲸鱼"，指针化收益最高。
+- **旧 assistant 轮**（近期窗口之外）—— 保留一行 head 或丢弃。
+- **近期窗口**（最后 N 轮）—— 原样保留。
+
+纯函数、无模型调用 → **构造上即 eval 安全**（满足 invariant #2）。
+
+### M3.2b — 主动阈值触发（主，被动兜底）
+
+- 在 query 循环的**轮边界**估 token；超 `softLimit`（默认上下文预算 75%）就在下一请求前压。
+- **压得狠**：目标降到 ~50% 预算，最大化两次压缩间的轮数（缓存友好，见上）。
+- 现有 `prompt_too_long`/`max_output` 被动路径**保留为安全网**（兜住意外）。
+- 压缩发生时 emit 一个 `compact` LoopEvent，CLI/session 记录（复用 M1.4 归档 + 现有 session compact event）。
+
+### M3.2c — LLM 摘要器（后置，opt-in）
+
+- `compactMessages(messages, { summarizer })` 注入点（镜像 M1.4 的 `archiver`、FakeModel 模式）：`summarizer: (dropped) => Promise<string>`，把丢弃段摘成一条 recap。
+- 语义最强但非确定 + 花钱 → 测试里注入脚本化 fake summarizer（同 FakeModel 套路）保持离线可测。
+- **本轮只设计注入点形状，不实现 LLM 摘要器**——保持 §1 首刀确定性、可 gate。
+
+### M3.1c 顺带做（归因，此时才真正有用）
+
+- 压缩落地后，"为何这轮 miss"才有报警价值。主循环每轮记 fork-trace，命中率掉时能区分是 system/tools/prefix 哪个变了——压缩那轮应显示 `message_prefix` miss，确认是预期的摊销重置而非 bug。
+
+### 已定的设计抉择（M3.2）
+
+- **摘要方式**：M3.2a 分层确定性为默认；M3.2c LLM 摘要器只设计注入点、不实现。
+- **触发**：M3.2b 主动阈值为主 + 被动兜底。
+- **归因**：M3.1c 在本轮顺带做（压缩使它有用）。
+
 ## 当前实现边界速查（探索阶段确认）
 
 - 消息**完全没有** `cache_control`（`anthropic.ts` 直接 `toAnthropicMessages(request.messages)`）。

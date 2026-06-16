@@ -43,7 +43,7 @@ export type EvalTaskMetrics = {
 export type EvalTaskResult = {
   taskId: string;
   title: string;
-  category: "read_only" | "safe_edit" | "bash" | "permission" | "sub_agent";
+  category: "read_only" | "safe_edit" | "bash" | "permission" | "sub_agent" | "compaction";
   prompt: string;
   permissionMode: PermissionMode;
   transcriptPath: string;
@@ -70,6 +70,7 @@ type EvalTask = {
   prompt: string;
   permissionMode: PermissionMode;
   maxTurns?: number;
+  contextBudgetTokens?: number;
   script: FakeModelStep[];
   validate(fixtureDir: string, events: readonly LoopEvent[]): Promise<string[]>;
 };
@@ -93,7 +94,8 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
       tools: toolRegistry,
       toolContext: { cwd: fixtureDir },
       permissionMode: task.permissionMode,
-      maxTurns: task.maxTurns ?? 8
+      maxTurns: task.maxTurns ?? 8,
+      contextBudgetTokens: task.contextBudgetTokens
     });
 
     const terminalState = finalTerminalState(events);
@@ -428,6 +430,35 @@ function createEvalTasks(): EvalTask[] {
         );
         return ranAgent ? [] : ["explore sub-agent did not complete successfully"];
       }
+    },
+    {
+      taskId: "proactive-compaction",
+      title: "Proactive compaction fires when the transcript crosses the soft limit",
+      category: "compaction",
+      prompt: "Read the big file, then summarize it.",
+      permissionMode: "plan",
+      // Tiny budget so one big.txt Read (~16k chars) crosses the 75% soft limit.
+      contextBudgetTokens: 2_000,
+      script: [
+        {
+          type: "assistant_message",
+          content: "Reading the large file.",
+          usage: usage(900, 30, 0, 0)
+        },
+        { type: "tool_use", toolUse: { id: "ev_big", name: "Read", input: { path: "src/big.txt" } } },
+        { type: "turn_break" },
+        {
+          type: "assistant_message",
+          content: "Large file read; summarizing.",
+          usage: usage(300, 40, 0, 0)
+        }
+      ],
+      async validate(_fixtureDir, events) {
+        const compacted = events.some(
+          (e) => e.type === "compaction" && e.reason === "proactive" && e.afterTokens < e.beforeTokens
+        );
+        return compacted ? [] : ["proactive compaction did not fire on the oversized transcript"];
+      }
     }
   ];
 }
@@ -442,6 +473,13 @@ async function writeEvalFixture(fixtureDir: string): Promise<void> {
   await writeFile(
     join(fixtureDir, "src", "math.ts"),
     ["export function add(a: number, b: number): number {", "  return a - b;", "}", ""].join("\n"),
+    "utf8"
+  );
+  // A large file so a single Read produces a token "whale" that drives the
+  // proactive-compaction eval task deterministically.
+  await writeFile(
+    join(fixtureDir, "src", "big.txt"),
+    `${"// filler line to inflate the read result\n".repeat(400)}`,
     "utf8"
   );
 }

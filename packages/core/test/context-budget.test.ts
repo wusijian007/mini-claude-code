@@ -8,6 +8,7 @@ import {
   ModelError,
   buildTool,
   compactMessages,
+  compactMessagesTiered,
   collectQuery,
   estimateMessagesTokens,
   executeToolUse,
@@ -49,6 +50,94 @@ describe("context budget helpers", () => {
     expect(compacted.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
     expect(String(compacted[1]?.content)).toContain("context compacted");
     expect(estimateMessagesTokens(compacted)).toBeLessThan(estimateMessagesTokens(messages));
+  });
+});
+
+describe("tiered compaction (M3.2a)", () => {
+  // A realistic agent transcript: root task, a stale Read whose tool_result
+  // is the token whale, then a recent exchange.
+  function transcript(): Message[] {
+    return [
+      { role: "user", content: "find and summarize the math helper" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll read the file." },
+          { type: "tool_use", toolUse: { id: "tu_read", name: "Read", input: { path: "src/math.ts" } } }
+        ]
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool_result",
+            result: {
+              toolUseId: "tu_read",
+              status: "success",
+              content: "L".repeat(8_000),
+              artifactPath: ".myagent/artifacts/sess/x.txt"
+            }
+          }
+        ]
+      },
+      { role: "assistant", content: "It defines add()." },
+      { role: "user", content: "now what does subtract do?" }
+    ];
+  }
+
+  it("pointer-izes the stale tool_result whale while keeping root + recent verbatim", () => {
+    const messages = transcript();
+    const before = estimateMessagesTokens(messages);
+    const out = compactMessagesTiered(messages, {
+      targetTokens: 200,
+      rootMessages: 1,
+      recentWindowMessages: 2,
+      pointerizeOverChars: 600
+    });
+
+    // Root task untouched.
+    expect(out[0].content).toBe("find and summarize the math helper");
+    // The stale tool_result is now a compact pointer naming the tool + input + size + artifact.
+    const toolMsg = out[2];
+    const block = Array.isArray(toolMsg.content) ? toolMsg.content[0] : undefined;
+    const pointer = block && block.type === "tool_result" ? block.result.content : "";
+    expect(pointer).toContain("[archived Read(src/math.ts) result:");
+    expect(pointer).toContain("8000 chars omitted");
+    expect(pointer).toContain(".myagent/artifacts/sess/x.txt");
+    // Pairing preserved: the tool_use id still has its tool_result.
+    expect(block && block.type === "tool_result" ? block.result.toolUseId : "").toBe("tu_read");
+    // Recent window kept verbatim.
+    expect(out[out.length - 1].content).toBe("now what does subtract do?");
+    // Big token reduction.
+    expect(estimateMessagesTokens(out)).toBeLessThan(before / 2);
+  });
+
+  it("returns the transcript untouched when already under target (cache-preserving)", () => {
+    const small: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" }
+    ];
+    const out = compactMessagesTiered(small, { targetTokens: 10_000 });
+    expect(out).toEqual(small);
+  });
+
+  it("archives the original (unshrunk) stale slice exactly once", () => {
+    const messages = transcript();
+    const archived: Message[][] = [];
+    compactMessagesTiered(messages, {
+      targetTokens: 200,
+      rootMessages: 1,
+      recentWindowMessages: 2,
+      archiveSink: (slice) => archived.push([...slice]),
+      pointerizeOverChars: 600
+    });
+    expect(archived).toHaveLength(1);
+    // The archived copy retains the FULL original tool_result content.
+    const archivedTool = archived[0].find((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result"));
+    const archivedBlock = archivedTool && Array.isArray(archivedTool.content)
+      ? archivedTool.content.find((b) => b.type === "tool_result")
+      : undefined;
+    expect(archivedBlock && archivedBlock.type === "tool_result" ? archivedBlock.result.content.length : 0).toBe(8_000);
   });
 });
 
