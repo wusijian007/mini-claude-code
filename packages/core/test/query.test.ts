@@ -269,3 +269,102 @@ describe("query loop", () => {
     ]);
   });
 });
+
+describe("verification gate (M3.3)", () => {
+  // A mock executor whose verify exit code is scripted per call, so the
+  // edit->verify->fix cycle is fully deterministic and offline.
+  function scriptedExecutor(exitCodes: number[]) {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    let i = 0;
+    return {
+      calls,
+      executor: {
+        async run(input: { command: string; args: readonly string[] }) {
+          calls.push({ command: input.command, args: input.args });
+          const exitCode = exitCodes[Math.min(i, exitCodes.length - 1)];
+          i += 1;
+          return { exitCode, stdout: exitCode === 0 ? "OK" : "1 failing test", stderr: "", timedOut: false };
+        }
+      }
+    };
+  }
+
+  it("completes when the verify command passes", async () => {
+    const { executor, calls } = scriptedExecutor([0]);
+    const events = await collectQuery({
+      model: new FakeModel([{ type: "assistant_message", content: "done" }]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd(), executor },
+      verify: { command: "npm", args: ["test"] }
+    });
+
+    const verify = events.find((e) => e.type === "verification");
+    expect(verify).toMatchObject({ type: "verification", passed: true, command: "npm test" });
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("bounces a failure back, then completes after the fix passes", async () => {
+    // verify fails on first check, passes on the second (after the model "fixes").
+    const { executor } = scriptedExecutor([1, 0]);
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "assistant_message", content: "first attempt" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "fixed it" }
+      ]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd(), executor },
+      verify: { command: "npm", args: ["test"], maxBounces: 2 },
+      maxTurns: 6
+    });
+
+    const verifications = events.filter((e) => e.type === "verification");
+    expect(verifications).toHaveLength(2);
+    expect(verifications[0]).toMatchObject({ passed: false });
+    expect(verifications[1]).toMatchObject({ passed: true });
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("ends with verification_failed after exceeding maxBounces", async () => {
+    const { executor } = scriptedExecutor([1]); // always fails
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "assistant_message", content: "a" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "b" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "c" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "d" }
+      ]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd(), executor },
+      verify: { command: "tsc", args: ["--noEmit"], maxBounces: 1 },
+      maxTurns: 6
+    });
+
+    const terminal = events.at(-1);
+    expect(terminal).toMatchObject({
+      type: "terminal_state",
+      state: { status: "verification_failed" }
+    });
+    // The reflective failure turn was injected at least once (bounce happened).
+    expect(events.filter((e) => e.type === "verification").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not run verify when no verify config is given (back-compat)", async () => {
+    const { executor, calls } = scriptedExecutor([1]);
+    const events = await collectQuery({
+      model: new FakeModel([{ type: "assistant_message", content: "done" }]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd(), executor }
+    });
+    expect(calls).toHaveLength(0);
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+});
