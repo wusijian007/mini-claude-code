@@ -49,6 +49,14 @@ export type ModelRequest = {
   timeoutMs?: number;
   signal?: AbortSignal;
   tools?: readonly ModelToolDefinition[];
+  /**
+   * When true, the provider marks the conversation prefix as a prompt-cache
+   * breakpoint (cache_control on the last message's last block). The next
+   * turn's request is a strict extension of this one, so the prefix hits
+   * Anthropic's incremental cache. The agent loop sets this; the plain
+   * `chat` path leaves it off. No-op for providers without prompt caching.
+   */
+  cacheConversation?: boolean;
 };
 
 export type ModelResponse = {

@@ -683,6 +683,10 @@ function formatSessionUsage(
   lines.push(
     `${"total".padStart(3)}  ${" ".padEnd(14)}  ${String(totals.inputTokens).padStart(7)}  ${String(totals.outputTokens).padStart(7)}  ${String(totals.cacheCreationInputTokens).padStart(8)}  ${String(totals.cacheReadInputTokens).padStart(8)}  ${("$" + totals.costUsd.toFixed(4)).padStart(10)}`
   );
+  lines.push(
+    `cache hit ratio: ${formatCacheHitRatio(totals.cacheReadInputTokens, totals.inputTokens)} ` +
+      `(cache_read ${totals.cacheReadInputTokens} / [cache_read + in] ${totals.cacheReadInputTokens + totals.inputTokens})`
+  );
   const bootstrapCost = record.bootstrap.costUsd ?? 0;
   lines.push(`bootstrap.costUsd: $${bootstrapCost.toFixed(4)}`);
   if (!pricing) {
@@ -691,6 +695,20 @@ function formatSessionUsage(
     );
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Cache hit ratio = cache_read / (cache_read + uncached input). The share
+ * of input tokens served from Anthropic's prompt cache. Returns "n/a" when
+ * there is no input yet (avoids 0/0). Gateways that zero out streaming
+ * usage will report 0%; the offline eval suite reports real scripted values.
+ */
+function formatCacheHitRatio(cacheRead: number, input: number): string {
+  const denom = cacheRead + input;
+  if (denom <= 0) {
+    return "n/a";
+  }
+  return `${((cacheRead / denom) * 100).toFixed(1)}%`;
 }
 
 async function runTask(

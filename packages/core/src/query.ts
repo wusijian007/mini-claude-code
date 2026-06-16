@@ -131,6 +131,7 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
         system: options.system,
         signal: options.abortSignal,
         tools: requestTools,
+        cacheConversation: true,
         contextBudgetTokens: options.contextBudgetTokens ?? DEFAULT_CONTEXT_BUDGET_TOKENS,
         retryCounts,
         retryLimits,
@@ -274,6 +275,7 @@ type CollectModelTurnWithRetryOptions = {
   system?: string | readonly SystemTextBlock[];
   signal?: AbortSignal;
   tools: readonly ModelToolDefinition[];
+  cacheConversation?: boolean;
   contextBudgetTokens: number;
   retryCounts: Record<RecoverableModelErrorKind, number>;
   retryLimits: Record<RecoverableModelErrorKind, number>;
@@ -293,7 +295,8 @@ async function collectModelTurnWithRetry(
         maxTokens: options.maxTokens,
         system: options.system,
         signal: options.signal,
-        tools: options.tools
+        tools: options.tools,
+        cacheConversation: options.cacheConversation
       });
       const turn = options.profile
         ? await options.profile.time("model.turn", () => collectModelTurnWithMetadata(stream, options.profile), {

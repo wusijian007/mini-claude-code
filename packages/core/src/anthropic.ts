@@ -101,7 +101,9 @@ export class AnthropicModelClient implements ModelClient {
           model: request.model ?? this.#defaultModel,
           max_tokens: request.maxTokens ?? this.#defaultMaxTokens,
           system: request.system,
-          messages: toAnthropicMessages(request.messages),
+          messages: toAnthropicMessages(request.messages, {
+            cacheLastMessage: request.cacheConversation === true
+          }),
           ...toAnthropicTools(request.tools)
         },
         toAnthropicRequestOptions(request.signal, request.timeoutMs)
@@ -142,7 +144,9 @@ export class AnthropicModelClient implements ModelClient {
         model: request.model ?? this.#defaultModel,
         max_tokens: request.maxTokens ?? this.#defaultMaxTokens,
         system: request.system,
-        messages: toAnthropicMessages(request.messages),
+        messages: toAnthropicMessages(request.messages, {
+          cacheLastMessage: request.cacheConversation === true
+        }),
         ...toAnthropicTools(request.tools),
         stream: true
       },
@@ -297,13 +301,41 @@ export function parseIdleTimeoutMs(raw: string | undefined): number | undefined 
   return Math.floor(parsed);
 }
 
-export function toAnthropicMessages(messages: readonly Message[]): AnthropicMessageParam[] {
-  return messages.map((message) => {
+export function toAnthropicMessages(
+  messages: readonly Message[],
+  options: { cacheLastMessage?: boolean } = {}
+): AnthropicMessageParam[] {
+  const mapped: AnthropicMessageParam[] = messages.map((message) => {
     return {
       role: message.role === "tool" ? "user" : message.role,
       content: toAnthropicContent(message.content)
     };
   });
+
+  // M3.1a — mark the conversation prefix as a prompt-cache breakpoint by
+  // attaching cache_control to the LAST block of the LAST message. The next
+  // turn appends to this prefix, so it hits Anthropic's incremental cache.
+  if (options.cacheLastMessage && mapped.length > 0) {
+    const last = mapped[mapped.length - 1];
+    last.content = withCacheControlOnLastBlock(last.content);
+  }
+
+  return mapped;
+}
+
+function withCacheControlOnLastBlock(
+  content: string | Array<Record<string, unknown>>
+): Array<Record<string, unknown>> {
+  // cache_control can only ride on a content block, never on a bare string,
+  // so normalize a string body into a single text block first.
+  const blocks: Array<Record<string, unknown>> =
+    typeof content === "string" ? [{ type: "text", text: content }] : [...content];
+  if (blocks.length === 0) {
+    return blocks;
+  }
+  const lastIndex = blocks.length - 1;
+  blocks[lastIndex] = { ...blocks[lastIndex], cache_control: { type: "ephemeral" } };
+  return blocks;
 }
 
 export function classifyAnthropicError(error: unknown, requestId?: string): ModelError {
