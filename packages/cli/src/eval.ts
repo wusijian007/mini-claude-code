@@ -5,12 +5,14 @@ import {
   FakeModel,
   collectQuery,
   estimateUsageCostUsd,
+  type CommandExecutor,
   type CostRates,
   type FakeModelStep,
   type LoopEvent,
   type ModelUsage,
   type PermissionMode,
-  type TerminalState
+  type TerminalState,
+  type VerifyConfig
 } from "@mini-claude-code/core";
 import { createProjectToolRegistry } from "@mini-claude-code/tools";
 
@@ -43,7 +45,14 @@ export type EvalTaskMetrics = {
 export type EvalTaskResult = {
   taskId: string;
   title: string;
-  category: "read_only" | "safe_edit" | "bash" | "permission" | "sub_agent" | "compaction";
+  category:
+    | "read_only"
+    | "safe_edit"
+    | "bash"
+    | "permission"
+    | "sub_agent"
+    | "compaction"
+    | "self_correction";
   prompt: string;
   permissionMode: PermissionMode;
   transcriptPath: string;
@@ -71,6 +80,8 @@ type EvalTask = {
   permissionMode: PermissionMode;
   maxTurns?: number;
   contextBudgetTokens?: number;
+  verify?: VerifyConfig;
+  executor?: CommandExecutor;
   script: FakeModelStep[];
   validate(fixtureDir: string, events: readonly LoopEvent[]): Promise<string[]>;
 };
@@ -92,10 +103,11 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
       model: new FakeModel(task.script),
       initialMessages: [{ role: "user", content: task.prompt }],
       tools: toolRegistry,
-      toolContext: { cwd: fixtureDir },
+      toolContext: { cwd: fixtureDir, executor: task.executor },
       permissionMode: task.permissionMode,
       maxTurns: task.maxTurns ?? 8,
-      contextBudgetTokens: task.contextBudgetTokens
+      contextBudgetTokens: task.contextBudgetTokens,
+      verify: task.verify
     });
 
     const terminalState = finalTerminalState(events);
@@ -459,8 +471,58 @@ function createEvalTasks(): EvalTask[] {
         );
         return compacted ? [] : ["proactive compaction did not fire on the oversized transcript"];
       }
+    },
+    {
+      taskId: "self-correction",
+      title: "Verification gate: fail once, fix, pass (edit -> test -> fix)",
+      category: "self_correction",
+      prompt: "Make the change and ensure the tests pass.",
+      permissionMode: "plan",
+      // Injected mock executor: verify fails on the first check, passes on the
+      // second (after the model's "fix" turn) — fully deterministic, offline.
+      executor: scriptedVerifyExecutor([1, 0]),
+      verify: { command: "npm", args: ["test"], maxBounces: 2 },
+      maxTurns: 6,
+      script: [
+        { type: "assistant_message", content: "Initial change applied.", usage: usage(800, 30, 0, 0) },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "Saw the failure; applied the fix.", usage: usage(400, 40, 0, 0) }
+      ],
+      async validate(_fixtureDir, events) {
+        const verifications = events.filter((e) => e.type === "verification");
+        const failedThenPassed =
+          verifications.length === 2 &&
+          verifications[0].type === "verification" &&
+          !verifications[0].passed &&
+          verifications[1].type === "verification" &&
+          verifications[1].passed;
+        return failedThenPassed
+          ? []
+          : ["expected verify to fail once then pass after the fix bounce"];
+      }
     }
   ];
+}
+
+/**
+ * A deterministic mock CommandExecutor whose verify exit codes are scripted
+ * per call. Lets the self-correction eval task exercise edit -> test -> fix
+ * entirely offline (the determinism invariant — see docs/v3-kernel-roadmap.md).
+ */
+function scriptedVerifyExecutor(exitCodes: number[]): CommandExecutor {
+  let i = 0;
+  return {
+    async run() {
+      const exitCode = exitCodes[Math.min(i, exitCodes.length - 1)];
+      i += 1;
+      return {
+        exitCode,
+        stdout: exitCode === 0 ? "All tests passed" : "1 failing test",
+        stderr: "",
+        timedOut: false
+      };
+    }
+  };
 }
 
 async function writeEvalFixture(fixtureDir: string): Promise<void> {

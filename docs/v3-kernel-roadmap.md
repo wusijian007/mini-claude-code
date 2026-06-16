@@ -120,6 +120,53 @@ v1/v2 的里程碑彼此独立，"commit message 即 spec" 足够。v3 不同—
 - **触发**：M3.2b 主动阈值为主 + 被动兜底。
 - **归因**：M3.1c 在本轮顺带做（压缩使它有用）。
 
+## §4 自愈循环 — 设计草案（M3.3） ✅ M3.3a/b 已交付（PR #19）
+
+> 大爆炸半径（改 query 终止语义 + 跑外部命令 + 可能跑飞），按分级规则动手前写这一节。
+> 已交付：完成路径验证闸门（on_terminal）、反思式失败注入、bounce 上限 + `verification_failed` 终态、`verification` LoopEvent、`myagent agent --verify`、self-correction eval 任务。finalize critic 仍后置。
+
+### 现状边界（探索确认）
+
+- `verifier` 子 agent 只在模型自选 `subagent_type:"verifier"` 时调用，从不自动；read-only、默认后台。
+- `finalizeBeforeMaxTurns` 注入终答轮 + 剥工具，无 critic 复审。
+- 工具错误裸 `tool_result` 回流，无"反思"包装。
+- executor（M2.1）**不受白名单限制**（白名单只在 Bash 工具 parser），可跑任意命令返回 `{exitCode, stdout, stderr, timedOut}`；`ToolContext.executor` 已就位、测试可注入 mock。
+
+### 核心机制：结构性验证闸门
+
+把"模型自选验证"升级为"循环结构性闸门"。**插入点 = 完成路径**：模型某轮不再调工具（今天直接 `terminal_state: completed` 返回）那一刻，是"我以为做完了"的天然 gate。
+
+闸门逻辑：
+1. 模型停止调工具 → 不立即完成，先跑配置的 verify 命令（经 `ToolContext.executor`，非 Bash 工具）。
+2. `exitCode === 0` → 真完成。
+3. 非 0 → 把失败**以反思式 user 轮**注入（不是裸 dump）：`验证失败（命令 X，exit N）：<截断输出>。请定位并修复，然后我会重新验证。`，bounce 计数 +1，循环继续。
+4. bounce 超 `maxBounces`（默认 2）→ 以显式 `verification_failed` 终态退出（不静默"完成"）。
+
+### M3.3a — 验证闸门（核心）
+
+- `QueryOptions.verify?: { command; args; when?; maxBounces? }`。
+- `when` 默认 `"on_terminal"`（模型自认完成时验证）；`"on_write"`（每个含成功 Edit/Write 的轮后验证，紧但贵）作为可选。
+- 经 `ToolContext.executor.run(...)` 跑，捕获 exitCode + 输出。
+- 失败注入反思式 user 轮 + bounce 计数；超限 → `verification_failed` 终态。
+- emit `verification` LoopEvent `{ passed, exitCode, bounce, command }` 供 CLI 打印 / session 记录 / 可观测。
+
+### M3.3b — CLI 接入 + eval
+
+- `myagent agent --verify "<command>"` 透传到 `QueryOptions.verify`。
+- eval 新增任务：edit → verify 失败一次 → fix → verify 通过，断言 bounce 发生 + 最终成功；用注入的 mock executor（verify 结果在 fix 后翻转）保持确定性。
+
+### 后置（§4 follow-up，不在 M3.3）
+
+- **finalize critic 过滤**：终答经只读 critic 子 agent 标无支撑断言。
+- 不变式 #2（离线可测）：verify 命令必须能经 executor seam mock，eval 才确定——M2.1 seam 正是为此。
+
+### 已定的设计抉择（M3.3）
+
+- **触发时机**：默认 `on_terminal`（模型自认完成时验证）；`on_write` 仅作配置项保留，本轮不设为默认。
+- **失败注入**：反思式 user 轮（命令 + exit + 截断输出 + "请修复，我会重验"），非裸 dump。
+- **超限行为**：超 `maxBounces`（默认 2）以显式 `verification_failed` 终态退出，不静默完成。
+- **critic 范围**：finalize critic 过滤后置到 §4 follow-up；M3.3 只做闸门。
+
 ## 当前实现边界速查（探索阶段确认）
 
 - 消息**完全没有** `cache_control`（`anthropic.ts` 直接 `toAnthropicMessages(request.messages)`）。

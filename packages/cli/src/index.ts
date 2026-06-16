@@ -64,7 +64,8 @@ import {
   type RemoteTurnInput,
   type RemoteTurnSink,
   type RemoteServerMessage,
-  type ToolDefinition
+  type ToolDefinition,
+  type VerifyConfig
 } from "@mini-claude-code/core";
 import {
   createMcpToolRegistry,
@@ -85,7 +86,7 @@ Usage:
   myagent --version
   myagent --help
   myagent chat <prompt>
-  myagent agent [--permission-mode <plan|default|bypassPermissions>] [--skill <name>] <prompt>
+  myagent agent [--permission-mode <plan|default|bypassPermissions>] [--skill <name>] [--verify "<command>"] <prompt>
   myagent tui
   myagent memory <path|list|save>
   myagent skill <list|show>
@@ -104,6 +105,7 @@ Usage:
 Week 18 scope:
   chat <prompt> sends a single text-only message to Anthropic.
   agent <prompt> runs the safe tool loop with Read, Glob, Grep, read-only Bash, Edit, and Write.
+  agent --verify "<command>" runs a verification gate when the model finishes: on non-zero exit the failure is fed back for a bounded edit->test->fix loop.
   agent reserves its final turn for a concise answer instead of stopping cold at max_turns.
   tui starts an interactive terminal session with history, slash commands, permissions, and Ctrl+C.
   memory save <taxonomy> <content> writes long-term memory under .myagent/projects/<project>/memory.
@@ -1280,7 +1282,8 @@ async function runAgent(
     stdout,
     stderr,
     dependencies,
-    skillNames: parsedArgs.skillNames
+    skillNames: parsedArgs.skillNames,
+    verify: parseVerifyConfig(parsedArgs.verifyCommand)
   });
   return result.exitCode;
 }
@@ -1736,6 +1739,7 @@ type RunAgentTurnOptions = {
   hookSnapshot?: HookSnapshot;
   skillSnapshot?: SkillSnapshot;
   skillNames?: readonly string[];
+  verify?: VerifyConfig;
   requestPermission?: (request: PermissionRequest) => Promise<PermissionDecision> | PermissionDecision;
   profile?: ProfileRecorder;
 };
@@ -1836,6 +1840,7 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
       maxTokens: DEFAULT_MAX_TOKENS,
       maxTurns: 8,
       finalizeBeforeMaxTurns: true,
+      verify: options.verify,
       profile
     })) {
       if (event.type === "assistant_message") {
@@ -1906,6 +1911,12 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
       if (event.type === "compaction") {
         options.stdout.write(
           `\n[compaction] ${event.reason}: ~${event.beforeTokens} -> ~${event.afterTokens} estimated tokens (turn ${event.turn})\n`
+        );
+      }
+
+      if (event.type === "verification") {
+        options.stdout.write(
+          `\n[verify] ${event.passed ? "passed" : `FAILED (exit ${event.exitCode})`}: ${event.command}${event.passed ? "" : ` — retrying (bounce ${event.bounce})`}\n`
         );
       }
 
@@ -2077,6 +2088,7 @@ type ParsedAgentArgs =
       prompt: string;
       permissionMode?: PermissionMode;
       skillNames: string[];
+      verifyCommand?: string;
     }
   | {
       ok: false;
@@ -2087,9 +2099,20 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
   const promptParts: string[] = [];
   let permissionMode: PermissionMode | undefined;
   const skillNames: string[] = [];
+  let verifyCommand: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+
+    if (arg === "--verify") {
+      const value = args[index + 1];
+      if (!value) {
+        return { ok: false, error: "Missing value for --verify" };
+      }
+      verifyCommand = value;
+      index += 1;
+      continue;
+    }
 
     if (arg === "--permission-mode") {
       const value = args[index + 1];
@@ -2124,8 +2147,25 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
     ok: true,
     prompt: promptParts.join(" ").trim(),
     permissionMode,
-    skillNames
+    skillNames,
+    verifyCommand
   };
+}
+
+/**
+ * Splits a `--verify "<command>"` string into the executor's command + args
+ * on whitespace. Simple split is enough for the common `npm test` /
+ * `tsc --noEmit` cases; a future version could honor quoting.
+ */
+function parseVerifyConfig(verifyCommand: string | undefined): VerifyConfig | undefined {
+  if (!verifyCommand) {
+    return undefined;
+  }
+  const parts = verifyCommand.trim().split(/\s+/).filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return { command: parts[0], args: parts.slice(1) };
 }
 
 function isPermissionMode(value: string): value is PermissionMode {

@@ -109,7 +109,12 @@ export type ToolDefinition<TInput extends Record<string, unknown> = Record<strin
   call(input: TInput, context: ToolContext): Promise<ToolCallResult> | ToolCallResult;
 };
 
-export type TerminalStateStatus = "completed" | "aborted" | "max_turns" | "error";
+export type TerminalStateStatus =
+  | "completed"
+  | "aborted"
+  | "max_turns"
+  | "error"
+  | "verification_failed";
 
 export type TerminalState = {
   status: TerminalStateStatus;
@@ -202,9 +207,19 @@ export type CompactionEvent = {
   turn: number;
 };
 
+export type VerificationEvent = {
+  type: "verification";
+  passed: boolean;
+  exitCode: number | null;
+  command: string;
+  bounce: number;
+  turn: number;
+};
+
 export type LoopEvent =
   | AssistantMessageEvent
   | ToolUseEvent
   | ToolResultEvent
   | TerminalStateEvent
-  | CompactionEvent;
+  | CompactionEvent
+  | VerificationEvent;

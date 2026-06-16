@@ -16,6 +16,7 @@ import {
 } from "./model.js";
 import { executeToolBatch, partitionToolCalls } from "./scheduler.js";
 import { toModelToolDefinition } from "./tool.js";
+import { createSpawnExecutor } from "./executor.js";
 import type { ProfileRecorder } from "./profile.js";
 import type {
   LoopEvent,
@@ -58,6 +59,24 @@ export type QueryOptions = {
    */
   proactiveCompactionSoftLimitRatio?: number;
   proactiveCompactionTargetRatio?: number;
+  /**
+   * M3.3 — structural verification gate. When set, the agent loop does not
+   * complete the moment the model stops calling tools: it first runs
+   * `command args` via `toolContext.executor` (NOT the whitelisted Bash
+   * tool). Exit 0 -> the run completes. Non-zero -> the failure is injected
+   * as a reflective user turn and the loop continues (an edit->test->fix
+   * cycle), bounded by `maxBounces` (default 2); exceeding it ends the run
+   * with a `verification_failed` terminal state instead of a silent
+   * "completed". `when` defaults to "on_terminal".
+   */
+  verify?: VerifyConfig;
+};
+
+export type VerifyConfig = {
+  command: string;
+  args?: readonly string[];
+  when?: "on_terminal";
+  maxBounces?: number;
 };
 
 const DEFAULT_MAX_TURNS = 10;
@@ -96,6 +115,7 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
   const proactiveTargetRatio = options.proactiveCompactionTargetRatio ?? 0.5;
   const proactiveSoftLimit = Math.floor(contextBudgetTokens * proactiveSoftLimitRatio);
   const proactiveTarget = Math.floor(contextBudgetTokens * proactiveTargetRatio);
+  let verifyBounces = 0;
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -169,6 +189,69 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
 
       const toolUses = extractToolUses(responseMessage);
       if (toolUses.length === 0) {
+        // M3.3 — structural verification gate. The model thinks it's done;
+        // before completing, run the configured verify command. On failure,
+        // inject the failure as a reflective user turn and keep looping
+        // (edit -> test -> fix), bounded by maxBounces.
+        if (options.verify && (options.verify.when ?? "on_terminal") === "on_terminal") {
+          const maxBounces = options.verify.maxBounces ?? 2;
+          const args = options.verify.args ?? [];
+          const displayCommand = [options.verify.command, ...args].join(" ").trim();
+          const executor = toolContext.executor ?? createSpawnExecutor();
+          const result = await executor
+            .run({
+              command: options.verify.command,
+              args,
+              cwd: toolContext.cwd,
+              timeoutMs: 120_000,
+              outputSink: { kind: "capture", maxBytes: 4_000 }
+            })
+            .catch((error: unknown) => ({
+              exitCode: null as number | null,
+              stdout: "",
+              stderr: error instanceof Error ? error.message : String(error),
+              timedOut: false
+            }));
+          const passed = result.exitCode === 0;
+          yield {
+            type: "verification",
+            passed,
+            exitCode: result.exitCode,
+            command: displayCommand,
+            bounce: verifyBounces,
+            turn
+          };
+
+          if (passed) {
+            yield { type: "terminal_state", state: { status: "completed" } };
+            return;
+          }
+
+          if (verifyBounces >= maxBounces || turn >= maxTurns - 1) {
+            yield {
+              type: "terminal_state",
+              state: {
+                status: "verification_failed",
+                reason: `verification command "${displayCommand}" failed after ${verifyBounces} fix attempt(s)`,
+                error: combineVerifyOutput(result.stdout, result.stderr)
+              }
+            };
+            return;
+          }
+
+          verifyBounces += 1;
+          options.profile?.mark("query.verify_bounce", {
+            turn,
+            bounce: verifyBounces,
+            exitCode: result.exitCode
+          });
+          messages.push({
+            role: "user",
+            content: reflectiveVerifyFailure(displayCommand, result.exitCode, result.stdout, result.stderr)
+          });
+          continue;
+        }
+
         yield {
           type: "terminal_state",
           state: { status: "completed" }
@@ -318,6 +401,32 @@ export type CollectedModelTurn = {
 
 export async function collectModelTurn(events: AsyncIterable<ModelStreamEvent>): Promise<Message> {
   return (await collectModelTurnWithMetadata(events)).message;
+}
+
+function combineVerifyOutput(stdout: string, stderr: string): string {
+  return [stdout.trim(), stderr.trim()].filter((part) => part.length > 0).join("\n").trim();
+}
+
+/**
+ * Builds the reflective user turn injected when a verification command fails.
+ * Phrased to point the model at locating + fixing the failure (not a raw dump)
+ * and to signal that another verify pass will follow.
+ */
+function reflectiveVerifyFailure(
+  command: string,
+  exitCode: number | null,
+  stdout: string,
+  stderr: string
+): string {
+  const output = combineVerifyOutput(stdout, stderr) || "(no output captured)";
+  return [
+    `Verification failed: \`${command}\` exited with code ${exitCode ?? "null"}.`,
+    "",
+    "Output:",
+    output,
+    "",
+    "Locate the cause and fix it. I will re-run the same verification after your next changes."
+  ].join("\n");
 }
 
 type CollectModelTurnWithRetryOptions = {

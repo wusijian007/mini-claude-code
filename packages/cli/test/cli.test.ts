@@ -54,6 +54,7 @@ describe("myagent cli", () => {
     expect(stdout.text()).toContain("Usage:");
     expect(stdout.text()).toContain("chat <prompt>");
     expect(stdout.text()).toContain("agent [--permission-mode");
+    expect(stdout.text()).toContain('--verify "<command>"');
     expect(stdout.text()).toContain("Week 18 scope");
     expect(stdout.text()).toContain("tui");
     expect(stdout.text()).toContain("memory save");

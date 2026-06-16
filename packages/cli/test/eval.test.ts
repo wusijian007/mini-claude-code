@@ -23,9 +23,9 @@ describe("M2.3 eval regression suite", () => {
     // Hard gate: every task must pass.
     expect(report.status).toBe("passed");
     expect(report.totals.passedCount).toBe(report.totals.taskCount);
-    expect(report.totals.taskCount).toBe(6);
+    expect(report.totals.taskCount).toBe(7);
 
-    // The six tasks we expect, by id + category.
+    // The seven tasks we expect, by id + category.
     const byId = new Map(report.tasks.map((t) => [t.taskId, t]));
     expect([...byId.keys()].sort()).toEqual(
       [
@@ -34,12 +34,14 @@ describe("M2.3 eval regression suite", () => {
         "proactive-compaction",
         "read-only-analysis",
         "safe-edit",
+        "self-correction",
         "subagent-explore"
       ].sort()
     );
     expect(byId.get("plan-mode-blocks-write")?.category).toBe("permission");
     expect(byId.get("subagent-explore")?.category).toBe("sub_agent");
     expect(byId.get("proactive-compaction")?.category).toBe("compaction");
+    expect(byId.get("self-correction")?.category).toBe("self_correction");
 
     // Deterministic metric pins — these are scripted via FakeModel usage,
     // so any change here means the agent loop's behavior changed, which
@@ -57,9 +59,9 @@ describe("M2.3 eval regression suite", () => {
     expect(readOnly?.metrics.costUsd).toBeCloseTo(0.0142, 4);
 
     // Totals are a stable fingerprint of the whole suite.
-    expect(report.totals.turns).toBe(13);
-    expect(report.totals.inputTokens).toBe(9600);
-    expect(report.totals.outputTokens).toBe(555);
+    expect(report.totals.turns).toBe(15);
+    expect(report.totals.inputTokens).toBe(10800);
+    expect(report.totals.outputTokens).toBe(625);
     expect(report.totals.costUsd).toBeGreaterThan(0);
 
     // The markdown report file exists and has the summary table.
@@ -91,7 +93,7 @@ describe("M2.3 eval regression suite", () => {
     });
     const text = formatEvalReport(report);
     expect(text.startsWith("[eval] passed")).toBe(true);
-    expect(text).toContain("totals: tasks=6 passed=6 turns=13");
+    expect(text).toContain("totals: tasks=7 passed=7 turns=15");
     expect(text).toContain("read-only-analysis: passed (read_only)");
   });
 });
