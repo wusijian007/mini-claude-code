@@ -190,6 +190,65 @@ describe("query loop", () => {
     expect(flags.every((f) => f === true)).toBe(true);
   });
 
+  it("proactively compacts at the turn boundary when the transcript crosses the soft limit (M3.2b)", async () => {
+    const bigReadTool: ToolDefinition = buildTool({
+      name: "Read",
+      description: "Read returning a large body.",
+      inputSchema: z.object({ path: z.string().min(1) }).strict(),
+      inputJsonSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false
+      },
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      call() {
+        // ~2000 tokens of tool_result — the whale that drives compaction.
+        return { status: "success", content: "X".repeat(8_000) };
+      }
+    });
+
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "tu1", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [{ role: "user", content: "read it" }],
+      tools: [bigReadTool],
+      toolContext: { cwd: process.cwd() },
+      // Tiny budget so one big tool_result crosses the soft limit (750).
+      contextBudgetTokens: 1_000,
+      maxTurns: 5
+    });
+
+    const compaction = events.find((e) => e.type === "compaction");
+    expect(compaction).toBeDefined();
+    expect(compaction).toMatchObject({ type: "compaction", reason: "proactive" });
+    if (compaction?.type === "compaction") {
+      expect(compaction.afterTokens).toBeLessThan(compaction.beforeTokens);
+    }
+    // The run still completes normally after compacting.
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("does not compact when the transcript stays under the soft limit", async () => {
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "tu1", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [{ role: "user", content: "read it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      contextBudgetTokens: 100_000,
+      maxTurns: 5
+    });
+    expect(events.find((e) => e.type === "compaction")).toBeUndefined();
+  });
+
   it("stops before model work when already aborted", async () => {
     const controller = new AbortController();
     controller.abort();

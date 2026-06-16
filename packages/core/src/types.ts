@@ -194,8 +194,17 @@ export type TerminalStateEvent = {
   state: TerminalState;
 };
 
+export type CompactionEvent = {
+  type: "compaction";
+  reason: "proactive" | "reactive";
+  beforeTokens: number;
+  afterTokens: number;
+  turn: number;
+};
+
 export type LoopEvent =
   | AssistantMessageEvent
   | ToolUseEvent
   | ToolResultEvent
-  | TerminalStateEvent;
+  | TerminalStateEvent
+  | CompactionEvent;
