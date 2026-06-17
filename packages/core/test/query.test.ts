@@ -1,6 +1,18 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { FakeModel, buildTool, collectQuery, query, type ModelClient, type ToolDefinition } from "../src/index.js";
+import {
+  FakeModel,
+  buildTool,
+  collectQuery,
+  createTaskStore,
+  query,
+  type ModelClient,
+  type ToolDefinition
+} from "../src/index.js";
 
 const readTool: ToolDefinition = buildTool({
   name: "Read",
@@ -366,5 +378,89 @@ describe("verification gate (M3.3)", () => {
     });
     expect(calls).toHaveLength(0);
     expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+});
+
+describe("turn-boundary task inbox (M3.4)", () => {
+  async function seedCompletedTask(store: ReturnType<typeof createTaskStore>, description: string, output: string) {
+    const task = await store.create({ type: "local_agent", description, cwd: process.cwd() });
+    await store.appendOutput(task.id, output);
+    await store.patch(task.id, (r) => ({ ...r, state: "completed", endedAt: new Date().toISOString() }));
+    return task.id;
+  }
+
+  it("drains this-run's completed background task into the context at the turn boundary", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-inbox-"));
+    const store = createTaskStore(cwd);
+    const id = await seedCompletedTask(store, "explore the codebase", "FOUND: 3 matching files");
+    const startedBackgroundTaskIds = new Set<string>([id]);
+
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "t1", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [{ role: "user", content: "go" }],
+      tools: [readTool],
+      toolContext: { cwd, taskStore: store, startedBackgroundTaskIds },
+      drainBackgroundTasks: true,
+      maxTurns: 5
+    });
+
+    const inbox = events.find((e) => e.type === "background_tasks");
+    expect(inbox).toBeDefined();
+    if (inbox?.type === "background_tasks") {
+      expect(inbox.drained).toHaveLength(1);
+      expect(inbox.drained[0]).toMatchObject({ id, state: "completed", description: "explore the codebase" });
+    }
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+
+    // Deduped: the task was marked notifiedAt, so a fresh drain finds nothing.
+    const reloaded = await store.load(id);
+    expect(reloaded.notifiedAt).toBeTruthy();
+  });
+
+  it("does NOT drain leftover tasks the run did not start", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-inbox-scope-"));
+    const store = createTaskStore(cwd);
+    // A completed task NOT in the run's registry (e.g. a prior session / CLI task).
+    await seedCompletedTask(store, "stale leftover", "should not appear");
+    const startedBackgroundTaskIds = new Set<string>(); // empty: this run started nothing
+
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "t1", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [{ role: "user", content: "go" }],
+      tools: [readTool],
+      toolContext: { cwd, taskStore: store, startedBackgroundTaskIds },
+      drainBackgroundTasks: true,
+      maxTurns: 5
+    });
+
+    expect(events.find((e) => e.type === "background_tasks")).toBeUndefined();
+  });
+
+  it("does nothing when drainBackgroundTasks is off (back-compat)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "myagent-inbox-off-"));
+    const store = createTaskStore(cwd);
+    const id = await seedCompletedTask(store, "ready task", "output");
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "t1", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [{ role: "user", content: "go" }],
+      tools: [readTool],
+      toolContext: { cwd, taskStore: store, startedBackgroundTaskIds: new Set([id]) }
+      // drainBackgroundTasks omitted -> off
+    });
+    expect(events.find((e) => e.type === "background_tasks")).toBeUndefined();
+    const reloaded = await store.load(id);
+    expect(reloaded.notifiedAt).toBeFalsy(); // not drained
   });
 });

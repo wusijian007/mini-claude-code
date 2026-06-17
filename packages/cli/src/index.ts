@@ -1830,6 +1830,7 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
         hookSnapshot,
         taskStore: createTaskStore(options.cwd, options.dependencies.taskRootDir),
         executor: createSpawnExecutor(),
+        startedBackgroundTaskIds: new Set<string>(),
         maxSubAgentDepth: 1,
         recordForkTrace: (trace) => appendForkTrace(options.cwd, bootstrap.sessionId, trace)
       },
@@ -1841,6 +1842,7 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
       maxTurns: 8,
       finalizeBeforeMaxTurns: true,
       verify: options.verify,
+      drainBackgroundTasks: true,
       profile
     })) {
       if (event.type === "assistant_message") {
@@ -1918,6 +1920,12 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
         options.stdout.write(
           `\n[verify] ${event.passed ? "passed" : `FAILED (exit ${event.exitCode})`}: ${event.command}${event.passed ? "" : ` — retrying (bounce ${event.bounce})`}\n`
         );
+      }
+
+      if (event.type === "background_tasks") {
+        for (const t of event.drained) {
+          options.stdout.write(`\n[background] ${t.id} finished: ${t.state} (${t.description})\n`);
+        }
       }
 
       if (event.type === "terminal_state" && event.state.status !== "completed") {

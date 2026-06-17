@@ -167,6 +167,51 @@ v1/v2 的里程碑彼此独立，"commit message 即 spec" 足够。v3 不同—
 - **超限行为**：超 `maxBounces`（默认 2）以显式 `verification_failed` 终态退出，不静默完成。
 - **critic 范围**：finalize critic 过滤后置到 §4 follow-up；M3.3 只做闸门。
 
+## §3 真后台状态机 — 设计草案（M3.4） ✅ M3.4a/b 已交付（PR #20）
+
+> 工程面最大的一项。但首刀只做"任务收件箱"——§3 的定义性能力（轮询→推送）；DAG 依赖 + 并发上限作为 follow-up，不在 M3.4。
+> 已交付：`ToolContext.startedBackgroundTaskIds` 注册表 + `runBackgroundSubAgent` 填充、`QueryOptions.drainBackgroundTasks`、轮边界 drain（scope 本 run、去重、注入状态行+有界输出尾部）、`background_tasks` LoopEvent、CLI `[background]` 打印、background-inbox eval 任务。DAG + 并发上限仍后置。
+
+### 现状边界（探索确认）
+
+- `createTaskStore`：`create/load/save/list/patch/appendOutput/readOutput` + per-task 锁 + rename retry（M1.2）。
+- 两类任务执行方式不同：`local_bash` 重 spawn 整个 CLI（detached worker）；`local_agent` **在进程内**经 `startManagedTask` 跑（[tools/index.ts runBackgroundSubAgent](packages/tools/src/index.ts)）。
+- 父 agent **只能轮询** `task read/list/notify`。`collectTaskNotifications`（每个终态任务靠 `notifiedAt` 只发一次）**已存在但只接到 CLI，没接进 query 循环**。
+- 轮边界是天然 hook 点——和 M3.2b 压缩、M3.3 验证闸门同一位置。
+
+### 核心机制：轮边界任务收件箱
+
+在轮边界 drain 已完成的后台任务，把结果作为合成观察消息注入 context——把轮询变推送。两个必须处理的约束：
+
+1. **Scope 到本 run**：只 drain 本次 query() 启动的任务，不碰 store 里的遗留 / CLI 起的无关任务。用一个共享可变注册表 `ToolContext.startedBackgroundTaskIds: Set<string>`：`runBackgroundSubAgent` 起任务时 `add(id)`，query 循环只 drain 注册表里的 id。（spread `turnToolContext` 复制的是 Set 引用，mutation 对原对象可见，只要不替换 Set。）
+2. **去重**：drain 时筛 `registry.has(id) && isTerminal(state) && !notifiedAt`，drain 后 patch `notifiedAt`——复用现成去重字段。
+
+注入是 **append-only**（追加 user 观察轮），前缀严格扩展 → 比 §1 压缩温和：只损失注入点之后的缓存，不是全 miss。无需特殊缓存处理。
+
+### M3.4a — 收件箱（核心）
+
+- `ToolContext.startedBackgroundTaskIds?: Set<string>`；`runBackgroundSubAgent` 填充。
+- `QueryOptions.drainBackgroundTasks?: boolean`（opt-in；agent 路径开）。
+- query 循环轮边界（M3.2b/M3.3 同一处）：若开启 + 有 taskStore + 注册表非空，扫本 run 的终态未通知任务，注入合成 user 轮 `[background task <id> finished: <state>]\n<output 尾部截断>`，patch `notifiedAt`，emit `background_tasks` LoopEvent。
+- 输出大 → 注入有界尾部（文件仍在盘上）。
+
+### M3.4b — CLI 接入 + tests + eval
+
+- agent 路径默认开 `drainBackgroundTasks`；CLI 打印 `[background]` 行。
+- 测试：起一个 in-process local_agent 任务（FakeModel 子 agent）→ 后续轮边界 drain → 断言注入 + `background_tasks` 事件 + 只 drain 本 run 的（遗留任务不被 drain）。
+- eval：新增任务，后台子 agent 完成后结果被 drain 进父 context，确定性（FakeModel）。
+
+### 后置（§3 follow-up，不在 M3.4）
+
+- **任务组 + 依赖 DAG**：`dependsOn`，调度就绪任务，传播取消。
+- **并发上限 + 优雅 kill**：max-N 并发队列，SIGTERM→drain→SIGKILL。
+
+### 已定的设计抉择（M3.4）
+
+- **范围**：首刀只做收件箱；DAG 依赖 + 并发上限后置到 §3 follow-up。
+- **drain 触发**：`QueryOptions.drainBackgroundTasks` 显式开启，且只 drain 本 run 注册表里的任务（不碰遗留 / CLI 起的无关任务）。
+- **注入内容**：状态行 + 有界输出尾部（文件仍在盘上可重读）。
+
 ## 当前实现边界速查（探索阶段确认）
 
 - 消息**完全没有** `cache_control`（`anthropic.ts` 直接 `toAnthropicMessages(request.messages)`）。

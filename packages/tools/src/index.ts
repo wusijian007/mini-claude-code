@@ -638,6 +638,10 @@ async function runBackgroundSubAgent(input: AgentInput, context: ToolContext): P
     }
   );
 
+  // M3.4 — register this task so the query loop's turn-boundary inbox drains
+  // its result back into the parent context (scoped to this run only).
+  context.startedBackgroundTaskIds?.add(task.task.id);
+
   return ok(
     [
       `Started background sub-agent task ${task.task.id}`,

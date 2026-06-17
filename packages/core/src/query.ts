@@ -17,6 +17,7 @@ import {
 import { executeToolBatch, partitionToolCalls } from "./scheduler.js";
 import { toModelToolDefinition } from "./tool.js";
 import { createSpawnExecutor } from "./executor.js";
+import { isTerminalTaskState, type TaskRecord, type TaskStore } from "./task.js";
 import type { ProfileRecorder } from "./profile.js";
 import type {
   LoopEvent,
@@ -70,6 +71,14 @@ export type QueryOptions = {
    * "completed". `when` defaults to "on_terminal".
    */
   verify?: VerifyConfig;
+  /**
+   * M3.4 — turn-boundary task inbox. When true and `toolContext.taskStore` +
+   * `toolContext.startedBackgroundTaskIds` are present, the loop drains
+   * THIS-run background tasks that have reached a terminal state into a
+   * synthetic observation message at each turn boundary (push instead of the
+   * model having to poll). Only tasks the run itself started are drained.
+   */
+  drainBackgroundTasks?: boolean;
 };
 
 export type VerifyConfig = {
@@ -357,6 +366,29 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
           }
         }
       }
+
+      // M3.4 — turn-boundary task inbox. Drain this-run background tasks that
+      // have reached a terminal state into a synthetic observation message, so
+      // the model is told (push) instead of having to poll. Append-only, so the
+      // cached prefix below the injection point survives (gentler than §1
+      // compaction's rewrite).
+      if (options.drainBackgroundTasks && toolContext.taskStore && toolContext.startedBackgroundTaskIds) {
+        const drained = await drainBackgroundTasks(
+          toolContext.taskStore,
+          toolContext.startedBackgroundTaskIds
+        );
+        if (drained.length > 0) {
+          messages.push({
+            role: "user",
+            content: formatBackgroundTaskInbox(drained)
+          });
+          yield {
+            type: "background_tasks",
+            drained: drained.map((d) => ({ id: d.task.id, state: d.task.state, description: d.task.description })),
+            turn
+          };
+        }
+      }
     }
 
     yield {
@@ -405,6 +437,62 @@ export async function collectModelTurn(events: AsyncIterable<ModelStreamEvent>):
 
 function combineVerifyOutput(stdout: string, stderr: string): string {
   return [stdout.trim(), stderr.trim()].filter((part) => part.length > 0).join("\n").trim();
+}
+
+const BACKGROUND_TASK_OUTPUT_TAIL_CHARS = 1_200;
+
+type DrainedTask = { task: TaskRecord; outputTail: string };
+
+/**
+ * Drains the run's own background tasks that have reached a terminal state and
+ * haven't been reported yet. Scoped strictly to `startedIds` (this-run tasks),
+ * and deduped via the store's `notifiedAt` marking so each task is surfaced
+ * exactly once. Returns each drained task with a bounded tail of its output.
+ */
+async function drainBackgroundTasks(
+  store: TaskStore,
+  startedIds: ReadonlySet<string>
+): Promise<DrainedTask[]> {
+  const drained: DrainedTask[] = [];
+  for (const id of startedIds) {
+    let record: TaskRecord;
+    try {
+      record = await store.load(id);
+    } catch {
+      continue; // task record vanished — skip
+    }
+    if (!isTerminalTaskState(record.state) || record.notifiedAt) {
+      continue;
+    }
+    const marked = await store.patch(id, (current) => ({ ...current, notifiedAt: nowIsoLocal() }));
+    const output = await store.readOutput(id, { maxBytes: BACKGROUND_TASK_OUTPUT_TAIL_CHARS }).catch(() => ({
+      content: ""
+    }));
+    drained.push({ task: marked, outputTail: tailString(output.content, BACKGROUND_TASK_OUTPUT_TAIL_CHARS) });
+  }
+  return drained;
+}
+
+function formatBackgroundTaskInbox(drained: readonly DrainedTask[]): string {
+  const lines = ["[background tasks finished — results below]"];
+  for (const { task, outputTail } of drained) {
+    lines.push("", `- ${task.id} (${task.description}): ${task.state}`);
+    if (outputTail.trim().length > 0) {
+      lines.push("  output:", outputTail.trim());
+    }
+  }
+  return lines.join("\n");
+}
+
+function tailString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `[...${value.length - maxChars} earlier chars omitted]\n${value.slice(-maxChars)}`;
+}
+
+function nowIsoLocal(): string {
+  return new Date().toISOString();
 }
 
 /**
