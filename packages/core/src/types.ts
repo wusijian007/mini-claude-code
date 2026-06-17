@@ -3,7 +3,7 @@ import type { CommandExecutor } from "./executor.js";
 import type { ModelClient, ModelUsage, SystemTextBlock } from "./model.js";
 import type { ForkTrace } from "./fork.js";
 import type { ProfileRecorder } from "./profile.js";
-import type { TaskStore } from "./task.js";
+import type { TaskScheduler, TaskStore } from "./task.js";
 
 export type MessageRole = "user" | "assistant" | "tool";
 
@@ -83,6 +83,13 @@ export type ToolContext = {
   parentMessages?: readonly Message[];
   tools?: readonly ToolDefinition[];
   taskStore?: TaskStore;
+  /**
+   * M3.6 — optional admission-controlled scheduler for background sub-agents.
+   * When present, the Agent tool's background path starts tasks through it
+   * (capping concurrency); when absent, tasks start unbounded via
+   * `startManagedTask`, preserving prior behavior.
+   */
+  taskScheduler?: TaskScheduler;
   /**
    * Optional command executor for external (non-builtin) tool spawns.
    * Defaults to `createSpawnExecutor()` (vanilla `child_process.spawn`)

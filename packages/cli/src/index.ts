@@ -14,6 +14,7 @@ import {
   createMemoryStore,
   createSessionStore,
   createTaskStore,
+  createTaskScheduler,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MODEL,
   formatSkillContext,
@@ -187,6 +188,7 @@ export type CliEnvironment = {
   MYAGENT_CACHE_WRITE_USD_PER_MTOK?: string;
   MYAGENT_CACHE_READ_USD_PER_MTOK?: string;
   MYAGENT_IDLE_TIMEOUT_MS?: string;
+  MYAGENT_MAX_BACKGROUND_TASKS?: string;
 };
 
 export type CliDependencies = {
@@ -1830,6 +1832,13 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
     const compactionSummarizer = options.semanticCompaction
       ? createModelCompactionSummarizer(client, modelName)
       : undefined;
+    // M3.6 — background sub-agents go through a shared scheduler so concurrency
+    // is capped by MYAGENT_MAX_BACKGROUND_TASKS (0/unset = unlimited).
+    const taskStore = createTaskStore(options.cwd, options.dependencies.taskRootDir);
+    const taskScheduler = createTaskScheduler({
+      store: taskStore,
+      maxConcurrent: parseMaxBackgroundTasks(options.env.MYAGENT_MAX_BACKGROUND_TASKS)
+    });
     for await (const event of query({
       model: client,
       initialMessages: [...options.initialMessages, userMessage],
@@ -1841,7 +1850,8 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
         profile,
         requestPermission: options.requestPermission,
         hookSnapshot,
-        taskStore: createTaskStore(options.cwd, options.dependencies.taskRootDir),
+        taskStore,
+        taskScheduler,
         executor: createSpawnExecutor(),
         startedBackgroundTaskIds: new Set<string>(),
         maxSubAgentDepth: 1,
@@ -2086,7 +2096,8 @@ function readDotEnv(path: string): CliEnvironment {
       key === "MYAGENT_OUTPUT_USD_PER_MTOK" ||
       key === "MYAGENT_CACHE_WRITE_USD_PER_MTOK" ||
       key === "MYAGENT_CACHE_READ_USD_PER_MTOK" ||
-      key === "MYAGENT_IDLE_TIMEOUT_MS"
+      key === "MYAGENT_IDLE_TIMEOUT_MS" ||
+      key === "MYAGENT_MAX_BACKGROUND_TASKS"
     ) {
       env[key] = value;
       continue;
@@ -2241,6 +2252,15 @@ function parseVerifyConfig(verifyCommand: string | undefined): VerifyConfig | un
 
 function isPermissionMode(value: string): value is PermissionMode {
   return value === "plan" || value === "default" || value === "bypassPermissions";
+}
+
+/**
+ * Parses MYAGENT_MAX_BACKGROUND_TASKS into a concurrency cap. Invalid or
+ * non-positive values mean "unlimited" (0), preserving the default.
+ */
+function parseMaxBackgroundTasks(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
 }
 
 function pricingFromEnv(env: CliEnvironment): CostRates | undefined {
