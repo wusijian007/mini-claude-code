@@ -23,9 +23,9 @@ describe("M2.3 eval regression suite", () => {
     // Hard gate: every task must pass.
     expect(report.status).toBe("passed");
     expect(report.totals.passedCount).toBe(report.totals.taskCount);
-    expect(report.totals.taskCount).toBe(9);
+    expect(report.totals.taskCount).toBe(10);
 
-    // The nine tasks we expect, by id + category.
+    // The ten tasks we expect, by id + category.
     const byId = new Map(report.tasks.map((t) => [t.taskId, t]));
     expect([...byId.keys()].sort()).toEqual(
       [
@@ -37,6 +37,7 @@ describe("M2.3 eval regression suite", () => {
         "read-only-analysis",
         "safe-edit",
         "self-correction",
+        "semantic-compaction",
         "subagent-explore"
       ].sort()
     );
@@ -46,6 +47,7 @@ describe("M2.3 eval regression suite", () => {
     expect(byId.get("self-correction")?.category).toBe("self_correction");
     expect(byId.get("background-inbox")?.category).toBe("background");
     expect(byId.get("finalize-critic")?.category).toBe("critic");
+    expect(byId.get("semantic-compaction")?.category).toBe("compaction");
 
     // Deterministic metric pins — these are scripted via FakeModel usage,
     // so any change here means the agent loop's behavior changed, which
@@ -63,9 +65,9 @@ describe("M2.3 eval regression suite", () => {
     expect(readOnly?.metrics.costUsd).toBeCloseTo(0.0142, 4);
 
     // Totals are a stable fingerprint of the whole suite.
-    expect(report.totals.turns).toBe(19);
-    expect(report.totals.inputTokens).toBe(13150);
-    expect(report.totals.outputTokens).toBe(765);
+    expect(report.totals.turns).toBe(21);
+    expect(report.totals.inputTokens).toBe(14350);
+    expect(report.totals.outputTokens).toBe(835);
     expect(report.totals.costUsd).toBeGreaterThan(0);
 
     // The markdown report file exists and has the summary table.
@@ -97,8 +99,9 @@ describe("M2.3 eval regression suite", () => {
     });
     const text = formatEvalReport(report);
     expect(text.startsWith("[eval] passed")).toBe(true);
-    expect(text).toContain("totals: tasks=9 passed=9 turns=19");
+    expect(text).toContain("totals: tasks=10 passed=10 turns=21");
     expect(text).toContain("read-only-analysis: passed (read_only)");
     expect(text).toContain("finalize-critic: passed (critic)");
+    expect(text).toContain("semantic-compaction: passed (compaction)");
   });
 });

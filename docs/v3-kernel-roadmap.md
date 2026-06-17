@@ -282,9 +282,10 @@ type DoneGate = { name: string; run(ctx): Promise<{ passed: boolean; reason?: st
 - **bounce**：全链共享一个上限计数器。
 - **critic 执行**：前台同步、只读 `verifier` 子 agent、自有 child context；opt-in，默认关。
 
-### M3.2c — opt-in LLM 摘要器（语义压缩）
+### M3.2c — opt-in LLM 摘要器（语义压缩） ✅ 已交付
 
 > 中爆炸半径(碰缓存 + 引入非确定)，注入点 §1 M3.2c 已设计形状，本节定实现契约。
+> 已交付：`compactMessagesWithSummary`(陈旧区整块替换为一条 LLM recap、根任务+近期窗口逐字、recent 边界 snap 过 leading tool_result 防孤儿、无陈旧历史时返回原样交给被动网)；`QueryOptions.compactionSummarizer` + 主动压缩路径分支(mark `proactive_compaction_semantic`)；`createModelCompactionSummarizer`(core 内,CLI 复用);`myagent agent --semantic-compaction`;`semantic-compaction` eval 任务(seed 陈旧 whale + 脚本化 fake summarizer,断言 seam 触发)。确定性指针化仍为默认。
 
 **契约**：`compactMessagesTiered(messages, { summarizer })`，`summarizer?: (dropped: readonly Message[]) => Promise<string>`(镜像 M1.4 `archiver` + FakeModel 模式)。
 

@@ -245,6 +245,57 @@ describe("query loop", () => {
     expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
   });
 
+  it("uses the LLM summarizer for proactive compaction when one is injected (M3.2c)", async () => {
+    let summarizerCalls = 0;
+    // Seed a real stale history (root + an early whale + a couple of turns); one
+    // more tool turn pushes the whale out of the recent window so the semantic
+    // summarize-and-drop path has accumulated history to condense.
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "tu_new", name: "Read", input: { path: "next.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [
+        { role: "user", content: "root task" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "reading the big file" },
+            { type: "tool_use", toolUse: { id: "old_big", name: "Read", input: { path: "big.ts" } } }
+          ]
+        },
+        {
+          role: "tool",
+          content: [
+            { type: "tool_result", result: { toolUseId: "old_big", status: "success", content: "X".repeat(8_000) } }
+          ]
+        },
+        { role: "assistant", content: "it's big" },
+        { role: "user", content: "keep going" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "now finish" }
+      ],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      contextBudgetTokens: 2_000,
+      maxTurns: 5,
+      compactionSummarizer: async (dropped) => {
+        summarizerCalls += 1;
+        return `RECAP of ${dropped.length} turn(s)`;
+      }
+    });
+
+    const compaction = events.find((e) => e.type === "compaction");
+    expect(compaction).toMatchObject({ type: "compaction", reason: "proactive" });
+    if (compaction?.type === "compaction") {
+      expect(compaction.afterTokens).toBeLessThan(compaction.beforeTokens);
+    }
+    // The injected summarizer was actually used (semantic path, not the default).
+    expect(summarizerCalls).toBeGreaterThanOrEqual(1);
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
   it("does not compact when the transcript stays under the soft limit", async () => {
     const events = await collectQuery({
       model: new FakeModel([

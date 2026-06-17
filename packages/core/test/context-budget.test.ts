@@ -9,6 +9,7 @@ import {
   buildTool,
   compactMessages,
   compactMessagesTiered,
+  compactMessagesWithSummary,
   collectQuery,
   estimateMessagesTokens,
   executeToolUse,
@@ -138,6 +139,105 @@ describe("tiered compaction (M3.2a)", () => {
       ? archivedTool.content.find((b) => b.type === "tool_result")
       : undefined;
     expect(archivedBlock && archivedBlock.type === "tool_result" ? archivedBlock.result.content.length : 0).toBe(8_000);
+  });
+});
+
+describe("semantic compaction (M3.2c)", () => {
+  // A transcript whose stale middle includes a tool_use/tool_result pair, so we
+  // can assert the summarize-and-drop path never orphans the pairing.
+  function transcript(): Message[] {
+    return [
+      { role: "user", content: "find and summarize the math helper" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll read the file." },
+          { type: "tool_use", toolUse: { id: "tu_read", name: "Read", input: { path: "src/math.ts" } } }
+        ]
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", result: { toolUseId: "tu_read", status: "success", content: "L".repeat(8_000) } }
+        ]
+      },
+      { role: "assistant", content: "It defines add()." },
+      { role: "user", content: "now what does subtract do?" },
+      { role: "assistant", content: "subtract() returns a - b." }
+    ];
+  }
+
+  it("replaces the stale region with a single LLM recap, keeping root + recent verbatim", async () => {
+    const messages = transcript();
+    const before = estimateMessagesTokens(messages);
+    const dropped: Message[][] = [];
+    const out = await compactMessagesWithSummary(messages, {
+      targetTokens: 200,
+      rootMessages: 1,
+      recentWindowMessages: 2,
+      summarizer: async (slice) => {
+        dropped.push([...slice]);
+        return "RECAP: read src/math.ts; it defines add().";
+      }
+    });
+
+    // Root task + recent window kept verbatim.
+    expect(out[0].content).toBe("find and summarize the math helper");
+    expect(out[out.length - 1].content).toBe("subtract() returns a - b.");
+    expect(out[out.length - 2].content).toBe("now what does subtract do?");
+    // The stale middle collapsed into ONE recap message.
+    const recap = out[1];
+    expect(recap.role).toBe("assistant");
+    expect(String(recap.content)).toContain("RECAP: read src/math.ts");
+    expect(String(recap.content)).toContain("summary of");
+    // The summarizer saw the dropped slice once, and it included the whale.
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0].some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result"))).toBe(true);
+    // Real token reduction.
+    expect(estimateMessagesTokens(out)).toBeLessThan(before / 2);
+  });
+
+  it("snaps the recent-window start past a leading tool_result so no tool_use is orphaned", async () => {
+    // recentWindowMessages=3 would start the window at the tool_result (index 2),
+    // orphaning tu_read; the boundary must snap earlier to include the assistant.
+    const messages = transcript();
+    const out = await compactMessagesWithSummary(messages, {
+      targetTokens: 50,
+      rootMessages: 1,
+      recentWindowMessages: 3,
+      summarizer: async () => "RECAP"
+    });
+
+    // Every tool_result kept in the output must still have its tool_use present.
+    const toolUseIds = new Set<string>();
+    const toolResultIds: string[] = [];
+    for (const message of out) {
+      if (!Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        if (block.type === "tool_use") toolUseIds.add(block.toolUse.id);
+        if (block.type === "tool_result") toolResultIds.push(block.result.toolUseId);
+      }
+    }
+    for (const id of toolResultIds) {
+      expect(toolUseIds.has(id)).toBe(true);
+    }
+  });
+
+  it("returns the transcript untouched when already under target (cache-preserving)", async () => {
+    const small: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" }
+    ];
+    let called = false;
+    const out = await compactMessagesWithSummary(small, {
+      targetTokens: 10_000,
+      summarizer: async () => {
+        called = true;
+        return "unused";
+      }
+    });
+    expect(out).toEqual(small);
+    expect(called).toBe(false);
   });
 });
 
