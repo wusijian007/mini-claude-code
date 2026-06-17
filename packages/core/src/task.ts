@@ -204,42 +204,7 @@ export async function startManagedTask(
     pid: record.type === "local_bash" ? process.pid : record.pid
   }));
 
-  const done = (async () => {
-    try {
-      const result = await runner(task, {
-        signal: controller.signal,
-        async appendOutput(chunk) {
-          await store.appendOutput(task.id, chunk);
-        }
-      });
-      const current = await store.load(task.id);
-      if (current.state === "killed" || controller.signal.aborted) {
-        if (current.state !== "killed") {
-          return markTaskKilled(store, task.id, "killed");
-        }
-        return current;
-      }
-      return await store.patch(task.id, (record) => ({
-        ...record,
-        state: result?.error ? "failed" : "completed",
-        endedAt: nowIso(),
-        exitCode: result?.exitCode ?? (result?.error ? 1 : 0),
-        error: result?.error
-      }));
-    } catch (error) {
-      const current = await store.load(task.id);
-      if (current.state === "killed") {
-        return current;
-      }
-      return await store.patch(task.id, (record) => ({
-        ...record,
-        state: "failed",
-        endedAt: nowIso(),
-        exitCode: 1,
-        error: error instanceof Error ? error.message : String(error)
-      }));
-    }
-  })();
+  const done = runManagedTaskBody(store, task.id, runner, controller);
 
   return {
     task: await store.load(task.id),
@@ -247,6 +212,149 @@ export async function startManagedTask(
     async kill(reason = "killed") {
       controller.abort();
       return markTaskKilled(store, task.id, reason);
+    }
+  };
+}
+
+/**
+ * Runs a task that is already in the "running" state to its terminal state,
+ * honoring abort/kill. Shared by {@link startManagedTask} (unbounded) and
+ * {@link createTaskScheduler} (admission-controlled).
+ */
+async function runManagedTaskBody(
+  store: TaskStore,
+  taskId: string,
+  runner: ManagedTaskRunner,
+  controller: AbortController
+): Promise<TaskRecord> {
+  const task = await store.load(taskId);
+  try {
+    const result = await runner(task, {
+      signal: controller.signal,
+      async appendOutput(chunk) {
+        await store.appendOutput(taskId, chunk);
+      }
+    });
+    const current = await store.load(taskId);
+    if (current.state === "killed" || controller.signal.aborted) {
+      if (current.state !== "killed") {
+        return markTaskKilled(store, taskId, "killed");
+      }
+      return current;
+    }
+    return await store.patch(taskId, (record) => ({
+      ...record,
+      state: result?.error ? "failed" : "completed",
+      endedAt: nowIso(),
+      exitCode: result?.exitCode ?? (result?.error ? 1 : 0),
+      error: result?.error
+    }));
+  } catch (error) {
+    const current = await store.load(taskId);
+    if (current.state === "killed") {
+      return current;
+    }
+    return await store.patch(taskId, (record) => ({
+      ...record,
+      state: "failed",
+      endedAt: nowIso(),
+      exitCode: 1,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+  }
+}
+
+export type TaskScheduler = {
+  /** Max tasks allowed in the "running" state at once; 0 = unlimited. */
+  readonly maxConcurrent: number;
+  /** Starts a managed task, queuing it as "pending" until a slot is free. */
+  start(input: CreateTaskInput, runner: ManagedTaskRunner): Promise<ManagedTask>;
+  /** Tasks currently admitted (running or about to run). */
+  runningCount(): number;
+  /** Tasks created but still waiting for a slot. */
+  pendingCount(): number;
+};
+
+/**
+ * M3.6 — admission control for managed tasks. A FIFO semaphore caps how many
+ * tasks are in the "running" state at once; tasks beyond the cap stay "pending"
+ * (queued) until a running task reaches a terminal state and frees a slot.
+ *
+ * `maxConcurrent` of 0 (the default) means unlimited — preserving the prior
+ * unbounded behavior, so this is non-breaking and opt-in. The cap is a strong
+ * guarantee only for in-process managed tasks the scheduler admits; detached
+ * `local_bash` workers spawned out-of-process are not gated across processes
+ * (a known v1 limitation — see docs/v3-kernel-roadmap.md §3 M3.6).
+ */
+export function createTaskScheduler(options: {
+  store: TaskStore;
+  maxConcurrent?: number;
+}): TaskScheduler {
+  const store = options.store;
+  const max = Math.max(0, Math.floor(options.maxConcurrent ?? 0));
+  let active = 0;
+  let pending = 0;
+  const waiters: Array<() => void> = [];
+
+  function acquire(): Promise<void> {
+    if (max <= 0 || active < max) {
+      active += 1;
+      return Promise.resolve();
+    }
+    pending += 1;
+    return new Promise<void>((resolve) => {
+      waiters.push(() => {
+        pending -= 1;
+        active += 1;
+        resolve();
+      });
+    });
+  }
+
+  function release(): void {
+    active -= 1;
+    const next = waiters.shift();
+    if (next) {
+      next();
+    }
+  }
+
+  return {
+    maxConcurrent: max,
+    runningCount: () => active,
+    pendingCount: () => pending,
+    async start(input, runner) {
+      const task = await store.create(input); // stays "pending" until admitted
+      const controller = new AbortController();
+      const done = (async () => {
+        await acquire();
+        try {
+          const current = await store.load(task.id);
+          // Cancelled while queued -> never run the work.
+          if (controller.signal.aborted || current.state === "killed") {
+            return current.state === "killed"
+              ? current
+              : await markTaskKilled(store, task.id, "cancelled while queued");
+          }
+          await store.patch(task.id, (record) => ({
+            ...record,
+            state: "running",
+            startedAt: nowIso(),
+            pid: record.type === "local_bash" ? process.pid : record.pid
+          }));
+          return await runManagedTaskBody(store, task.id, runner, controller);
+        } finally {
+          release();
+        }
+      })();
+      return {
+        task,
+        done,
+        async kill(reason = "killed") {
+          controller.abort();
+          return markTaskKilled(store, task.id, reason);
+        }
+      };
     }
   };
 }
@@ -300,18 +408,35 @@ export async function runLocalBashTask(
   }
 }
 
+export type ProcessSignaler = (pid: number, signal: NodeJS.Signals | 0) => boolean;
+
+export type KillOptions = {
+  /** ms to wait after SIGTERM before escalating to SIGKILL. Default DEFAULT_KILL_GRACE_MS. */
+  graceMs?: number;
+  /**
+   * Injectable signal sender (for tests): returns true if the process was
+   * alive (signal delivered). Defaults to a `process.kill` wrapper.
+   */
+  signalProcess?: ProcessSignaler;
+};
+
+const DEFAULT_KILL_GRACE_MS = 2_000;
+
 export async function markTaskKilled(
   store: TaskStore,
   taskId: string,
-  reason = "killed"
+  reason = "killed",
+  options: KillOptions = {}
 ): Promise<TaskRecord> {
   const current = await store.load(taskId);
+  // Only an out-of-process worker (detached local_bash) has a pid to signal;
+  // in-process managed tasks are cancelled cooperatively via their AbortSignal.
   if (current.pid && current.state === "running" && current.pid !== process.pid) {
-    try {
-      process.kill(current.pid);
-    } catch (_error) {
-      // The process may already be gone; the persisted terminal state is still useful.
-    }
+    await gracefulKillPid(
+      current.pid,
+      options.graceMs ?? DEFAULT_KILL_GRACE_MS,
+      options.signalProcess ?? defaultSignalProcess
+    );
   }
 
   return store.patch(taskId, (record) => ({
@@ -320,6 +445,38 @@ export async function markTaskKilled(
     endedAt: record.endedAt ?? nowIso(),
     error: reason
   }));
+}
+
+/**
+ * Graceful out-of-process termination: SIGTERM, wait `graceMs`, then SIGKILL if
+ * still alive. On Windows there is no real SIGTERM — `process.kill` maps it to
+ * TerminateProcess, so the first signal already terminates and the escalation
+ * is a no-op (documented degrade). Returns once the kill sequence is issued.
+ */
+async function gracefulKillPid(
+  pid: number,
+  graceMs: number,
+  signalProcess: ProcessSignaler
+): Promise<void> {
+  if (!signalProcess(pid, "SIGTERM")) {
+    return; // wasn't alive
+  }
+  if (!signalProcess(pid, 0)) {
+    return; // exited immediately (Windows TerminateProcess / fast SIGTERM handler)
+  }
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, graceMs)));
+  if (signalProcess(pid, 0)) {
+    signalProcess(pid, "SIGKILL");
+  }
+}
+
+function defaultSignalProcess(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function collectTaskNotifications(store: TaskStore): Promise<TaskRecord[]> {

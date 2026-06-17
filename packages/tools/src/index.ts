@@ -12,6 +12,7 @@ import {
   startManagedTask,
   type CommandExecutor,
   type JsonObjectSchema,
+  type ManagedTaskRunner,
   type ToolCallResult,
   type ToolContext,
   type ToolDefinition
@@ -620,23 +621,25 @@ async function runBackgroundSubAgent(input: AgentInput, context: ToolContext): P
   if (!context.taskStore) {
     throw new Error("Background Agent requires a task store in ToolContext");
   }
-  const task = await startManagedTask(
-    context.taskStore,
-    {
-      type: "local_agent",
-      description: `sub-agent: ${input.description}`,
-      cwd: context.cwd,
-      prompt: input.prompt
-    },
-    async (_task, controls) => {
-      const result = await runSynchronousSubAgent(input, context, controls.signal, controls.appendOutput);
-      await controls.appendOutput(formatSubAgentResult(result));
-      return {
-        exitCode: result.terminalStatus === "completed" ? 0 : 1,
-        error: result.terminalStatus === "completed" ? undefined : `sub-agent ended with ${result.terminalStatus}`
-      };
-    }
-  );
+  const createInput = {
+    type: "local_agent" as const,
+    description: `sub-agent: ${input.description}`,
+    cwd: context.cwd,
+    prompt: input.prompt
+  };
+  const runner: ManagedTaskRunner = async (_task, controls) => {
+    const result = await runSynchronousSubAgent(input, context, controls.signal, controls.appendOutput);
+    await controls.appendOutput(formatSubAgentResult(result));
+    return {
+      exitCode: result.terminalStatus === "completed" ? 0 : 1,
+      error: result.terminalStatus === "completed" ? undefined : `sub-agent ended with ${result.terminalStatus}`
+    };
+  };
+  // M3.6 — go through the run's scheduler (concurrency cap) when one is wired;
+  // otherwise start unbounded, preserving prior behavior.
+  const task = context.taskScheduler
+    ? await context.taskScheduler.start(createInput, runner)
+    : await startManagedTask(context.taskStore, createInput, runner);
 
   // M3.4 — register this task so the query loop's turn-boundary inbox drains
   // its result back into the parent context (scoped to this run only).

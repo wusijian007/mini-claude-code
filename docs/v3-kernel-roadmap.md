@@ -305,9 +305,10 @@ type DoneGate = { name: string; run(ctx): Promise<{ passed: boolean; reason?: st
 - **默认**：确定性指针化(M3.2a)仍为默认；摘要器纯 opt-in seam。
 - **缓存**：语义摘要与确定性压缩同属一次摊销重置，不新增缓存代价类别。
 
-### M3.6 — 并发上限 + 优雅 kill（砍 DAG）
+### M3.6 — 并发上限 + 优雅 kill（砍 DAG） ✅ 已交付
 
 > §3 后台收尾。只做"队列(并发上限)+ 优雅生命周期"，**不做拓扑(DAG)**。
+> 已交付：`createTaskScheduler({ store, maxConcurrent })` FIFO 准入信号量(超额任务停 pending,槽位释放再准入;`runManagedTaskBody` 抽出供 scheduler 与 `startManagedTask` 共用;`maxConcurrent=0` 不限=非破坏);`ToolContext.taskScheduler` + `runBackgroundSubAgent` 走 scheduler(absent 时回退 `startManagedTask`);CLI `MYAGENT_MAX_BACKGROUND_TASKS` env;`markTaskKilled` 优雅化(进程内 AbortSignal、detached SIGTERM→grace→SIGKILL、可注入 `signalProcess`、Windows 退化即时终止);6 个新测试(cap 用 started barrier 确定性、queue 取消、unbounded、SIGTERM→SIGKILL 升级、SIGTERM 被尊重不升级、in-process 不发信号)。**DAG 已砍**(理由见"明确砍掉")。
 
 **M3.6a — 并发上限**
 - config `maxConcurrentBackgroundTasks`(默认 0 = 不限，**非破坏**；opt-in 设上限)。
