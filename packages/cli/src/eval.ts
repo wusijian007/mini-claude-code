@@ -54,6 +54,7 @@ export type EvalTaskResult = {
     | "sub_agent"
     | "compaction"
     | "self_correction"
+    | "critic"
     | "background";
   prompt: string;
   permissionMode: PermissionMode;
@@ -86,6 +87,9 @@ type EvalTask = {
   executor?: CommandExecutor;
   /** Seed a completed background task this run "started", to exercise the M3.4 inbox. */
   seedBackgroundTask?: { description: string; output: string };
+  /** Scripted critic verdicts; when present, runs the M3.5 Finalize Critic gate with its own FakeModel. */
+  criticScript?: FakeModelStep[];
+  criticMaxBounces?: number;
   script: FakeModelStep[];
   validate(fixtureDir: string, events: readonly LoopEvent[]): Promise<string[]>;
 };
@@ -114,6 +118,11 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
       await taskStore.patch(seeded.id, (r) => ({ ...r, state: "completed", endedAt: new Date().toISOString() }));
       startedBackgroundTaskIds = new Set([seeded.id]);
     }
+    // M3.5 — the Finalize Critic gate runs on its OWN FakeModel (a separate
+    // scripted verdict stream), so it never shares the main loop's cursor.
+    const critic = task.criticScript
+      ? { model: new FakeModel(task.criticScript), maxBounces: task.criticMaxBounces }
+      : undefined;
     const events = await collectQuery({
       model: new FakeModel(task.script),
       initialMessages: [{ role: "user", content: task.prompt }],
@@ -123,6 +132,7 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
       maxTurns: task.maxTurns ?? 8,
       contextBudgetTokens: task.contextBudgetTokens,
       verify: task.verify,
+      critic,
       drainBackgroundTasks: Boolean(task.seedBackgroundTask)
     });
 
@@ -537,6 +547,39 @@ function createEvalTasks(): EvalTask[] {
           (e) => e.type === "background_tasks" && e.drained.length === 1 && e.drained[0].state === "completed"
         );
         return drained ? [] : ["background task was not drained into context at the turn boundary"];
+      }
+    },
+    {
+      taskId: "finalize-critic",
+      title: "Finalize Critic gate: reject a weak answer, revise, approve (M3.5)",
+      category: "critic",
+      prompt: "Answer the question completely.",
+      permissionMode: "plan",
+      // The critic runs on its own scripted FakeModel: it rejects the first
+      // answer, then approves the revision — fully deterministic, offline.
+      criticScript: [
+        { type: "assistant_message", content: "REJECT: the first answer omits the requested edge case" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "APPROVE" }
+      ],
+      criticMaxBounces: 2,
+      maxTurns: 6,
+      script: [
+        { type: "assistant_message", content: "Here is a first answer.", usage: usage(900, 30, 0, 0) },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "Here is the corrected, complete answer.", usage: usage(400, 40, 0, 0) }
+      ],
+      async validate(_fixtureDir, events) {
+        const critics = events.filter((e) => e.type === "critic");
+        const rejectedThenApproved =
+          critics.length === 2 &&
+          critics[0].type === "critic" &&
+          !critics[0].passed &&
+          critics[1].type === "critic" &&
+          critics[1].passed;
+        return rejectedThenApproved
+          ? []
+          : ["expected critic to reject once then approve after the revision"];
       }
     }
   ];

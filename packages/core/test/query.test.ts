@@ -381,6 +381,154 @@ describe("verification gate (M3.3)", () => {
   });
 });
 
+describe("Finalize Critic gate (M3.5)", () => {
+  // Reusable verify executor from the M3.3 suite shape: scripted exit codes.
+  function scriptedExecutor(exitCodes: number[]) {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    let i = 0;
+    return {
+      calls,
+      executor: {
+        async run(input: { command: string; args: readonly string[] }) {
+          calls.push({ command: input.command, args: input.args });
+          const exitCode = exitCodes[Math.min(i, exitCodes.length - 1)];
+          i += 1;
+          return { exitCode, stdout: exitCode === 0 ? "OK" : "fail", stderr: "", timedOut: false };
+        }
+      }
+    };
+  }
+
+  it("completes when the critic approves", async () => {
+    const critic = new FakeModel([{ type: "assistant_message", content: "APPROVE" }]);
+    const events = await collectQuery({
+      model: new FakeModel([{ type: "assistant_message", content: "the answer" }]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      critic: { model: critic }
+    });
+
+    expect(events.find((e) => e.type === "critic")).toMatchObject({ type: "critic", passed: true });
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("bounces a rejection back, then completes after the revision is approved", async () => {
+    const critic = new FakeModel([
+      { type: "assistant_message", content: "REJECT: missing the edge case" },
+      { type: "turn_break" },
+      { type: "assistant_message", content: "APPROVE" }
+    ]);
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "assistant_message", content: "first answer" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "revised answer" }
+      ]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      critic: { model: critic, maxBounces: 2 },
+      maxTurns: 6
+    });
+
+    const critics = events.filter((e) => e.type === "critic");
+    expect(critics).toHaveLength(2);
+    expect(critics[0]).toMatchObject({ passed: false, reason: "missing the edge case" });
+    expect(critics[1]).toMatchObject({ passed: true });
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("ends with verification_failed after exceeding the critic's bounce budget", async () => {
+    const critic = new FakeModel([
+      { type: "assistant_message", content: "REJECT: still wrong" },
+      { type: "turn_break" },
+      { type: "assistant_message", content: "REJECT: still wrong" }
+    ]);
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "assistant_message", content: "x" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "y" }
+      ]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      critic: { model: critic, maxBounces: 1 },
+      maxTurns: 6
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "terminal_state",
+      state: { status: "verification_failed" }
+    });
+    expect(events.filter((e) => e.type === "critic").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("runs verify before critic and fail-fasts: critic is not consulted when verify fails", async () => {
+    const { executor } = scriptedExecutor([1]); // verify always fails
+    const critic = new FakeModel([{ type: "assistant_message", content: "APPROVE" }]);
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "assistant_message", content: "a" },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "b" }
+      ]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd(), executor },
+      verify: { command: "npm", args: ["test"], maxBounces: 1 },
+      critic: { model: critic },
+      maxTurns: 6
+    });
+
+    // verify gates first; on its failure the loop bounces without ever asking
+    // the critic — so no critic event is emitted.
+    expect(events.filter((e) => e.type === "critic")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "verification").length).toBeGreaterThanOrEqual(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "terminal_state",
+      state: { status: "verification_failed" }
+    });
+  });
+
+  it("runs both gates in order when verify passes: verify event precedes critic event", async () => {
+    const { executor, calls } = scriptedExecutor([0]); // verify passes
+    const critic = new FakeModel([{ type: "assistant_message", content: "APPROVE" }]);
+    const events = await collectQuery({
+      model: new FakeModel([{ type: "assistant_message", content: "done" }]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd(), executor },
+      verify: { command: "npm", args: ["test"] },
+      critic: { model: critic }
+    });
+
+    const verifyIdx = events.findIndex((e) => e.type === "verification");
+    const criticIdx = events.findIndex((e) => e.type === "critic");
+    expect(verifyIdx).toBeGreaterThanOrEqual(0);
+    expect(criticIdx).toBeGreaterThan(verifyIdx);
+    expect(events[verifyIdx]).toMatchObject({ passed: true });
+    expect(events[criticIdx]).toMatchObject({ passed: true });
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not run the critic when no critic config is given (back-compat)", async () => {
+    const critic = new FakeModel([{ type: "assistant_message", content: "REJECT: should never run" }]);
+    const events = await collectQuery({
+      model: new FakeModel([{ type: "assistant_message", content: "done" }]),
+      initialMessages: [{ role: "user", content: "do it" }],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() }
+      // no critic — critic model is provided but must be ignored
+    });
+    void critic;
+    expect(events.filter((e) => e.type === "critic")).toHaveLength(0);
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+});
+
 describe("turn-boundary task inbox (M3.4)", () => {
   async function seedCompletedTask(store: ReturnType<typeof createTaskStore>, description: string, output: string) {
     const task = await store.create({ type: "local_agent", description, cwd: process.cwd() });

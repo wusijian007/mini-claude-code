@@ -212,6 +212,121 @@ v1/v2 的里程碑彼此独立，"commit message 即 spec" 足够。v3 不同—
 - **drain 触发**：`QueryOptions.drainBackgroundTasks` 显式开启，且只 drain 本 run 注册表里的任务（不碰遗留 / CLI 起的无关任务）。
 - **注入内容**：状态行 + 有界输出尾部（文件仍在盘上可重读）。
 
+## v3.1 follow-up 季 — 收口三项（M3.5 / M3.2c / M3.6）
+
+> 四项首刀（M3.1–M3.4）落地后，从各自的"后置"清单里收三项**最高杠杆**的 follow-up。
+> 决策（用户拍板）：**全做、砍 DAG**。顺序 **M3.5 → M3.2c → M3.6**。本节是这一季的 spec of record，PR 引用之。
+
+### 为什么是这三项（而非各项 follow-up 全收）
+
+各项首刀都留了后置清单（见 §1 M3.2c、§3 M3.4"后置"、§4 M3.3"后置"）。按"做一个核心 Claude Code 模式、小而可测"的标尺筛，只有三项过线：
+
+| 收 | 来自 | 一句话价值 | 为什么过线 |
+|---|---|---|---|
+| **M3.5 Finalize Critic** | §4 后置 | 自愈从**结构性**(退出码)升级到**语义性**(答非所问/漏需求/幻觉路径) | 退出码抓不到的失败才是真失败；复用现成 `verifier` 子 agent + verify 闸门结构，近乎免费 |
+| **M3.2c LLM 摘要器** | §1 后置 | 压缩从指针化升级到**语义压缩**(救回指针救不回的推理/散文) | 真·Claude Code 的 compact 就是 LLM 摘要；注入点 M3.2 已设计，opt-in 不动确定性默认 |
+| **M3.6 并发上限+优雅 kill** | §3 后置 | 后台从"无限并发+硬 kill"到**资源受控+优雅生命周期** | 信号量 + SIGTERM→grace→SIGKILL，小而真实 |
+
+### 明确砍掉：§3 任务依赖 DAG
+
+§3 后置里的"任务组 + 依赖 DAG"**本季不做，且默认不做**。理由钉死，避免日后重复讨论：
+
+1. **真·Claude Code 没有 DAG 调度器**——子 agent 是 spawn-and-await，没有依赖图。做 DAG 是building Airflow-lite，是"更多"而非"更像"。
+2. 撞 CLAUDE.md 两条明令：`No cloud control plane` + `prefer extending the existing primitives over building parallel ones`。
+3. 投入产出比最差：复杂度最高、却最不像 Claude Code 的真实模式。
+4. 重开条件：只有当出现一个**真实**的、收件箱(M3.4)+并发队列(M3.6)都解决不了的多任务编排需求时，才重新评估。
+
+### 耦合与顺序（这一季）
+
+| 耦合 | 说明 |
+|---|---|
+| M3.5 ⊥ M3.3 | critic 是 verify 闸门的**同一抽象的第二个实例**——先把单闸门泛化成 gate chain，verify 与 critic 都是 `DoneGate` |
+| M3.5 ~ M3.6 | 主题相关但**不强依赖**：critic 跑**前台同步**子 agent(循环要等它裁决)，不是后台任务；M3.6 治理的是后台异步任务 |
+| 全部 ⊥ 三条不变式 | critic 注入 append-only(#3)；摘要器是一次摊销缓存重置(#1)、脚本化 fake 保确定(#2)；并发/kill 不碰 context |
+
+顺序理由：**M3.5 先**(最高价值 + 立 gate 抽象)、**M3.2c 次**(seam 已设计、opt-in 安全)、**M3.6 末**(工程面最大、新意最低)。
+
+### M3.5 — Definition-of-Done gate chain + Finalize Critic ✅ 已交付（M3.5a/b/c）
+
+> 大爆炸半径(改完成路径语义 + 多一次 LLM 调用)，动手前写这节。
+> 已交付：单验证闸门泛化为 `DoneGate` 链(verify 先、critic 后、共享 bounce 预算)；Finalize Critic = tool-less 只读 model 调用(core 不能 import Agent 工具，故 tool-less 调用是"只读 verifier"的层安全实现)在自有 child context 判 APPROVE/REJECT；`QueryOptions.critic`、`CriticEvent`、`myagent agent --critic [--critic-instructions]`、`finalize-critic` eval 任务(独立脚本化 critic model `[REJECT, APPROVE]`)。单 gate 退化 = 零行为变化(M3.3 测试全绿)。
+
+**核心 reframe**：现在完成路径([query.ts:205-259](packages/core/src/query.ts))是**单**验证闸门。把它泛化成一条 **gate chain**——"definition of done" = 按序跑的一串 gate，任一不过则反思注入 + bounce、循环继续；全过才真完成。
+
+```
+type DoneGate = { name: string; run(ctx): Promise<{ passed: boolean; reason?: string; detail?: string }> }
+```
+
+两个 gate 实例：
+1. **structural verify**(现有)——经 executor 跑 verify 命令，看退出码。
+2. **semantic critic**(新)——spawn 只读 `verifier` 子 agent，喂"根任务 + 终答文本"，判"这是否真的满足了任务"，返回 approve / reject(reason)。
+
+**M3.5a — gate chain 抽象**
+- 把 query.ts 里写死的 verify 分支抽成 gate 列表，单 verify 退化为"链里只有一个 gate"——**零行为变化**(回归现有 verify 测试)。
+- bounce 预算**全链共享**一个计数器(防 gate 间交替刷 bounce 死循环)。
+
+**M3.5b — Finalize Critic gate**
+- `QueryOptions.critic?: { maxBounces?; model?; instructions? }`，opt-in；不设 = 链里仍只有 verify(或空)，默认关 → 零行为变化。
+- **gate 顺序：verify 先(便宜、确定、退出码)、critic 后(贵、一次 LLM)**——fail-fast，不编译就别花 critic 调用。
+- critic 经 model client 跑 → FakeModel 脚本化 approve/reject 保确定(不变式 #2)。
+- critic = 只读 `verifier`，构造上不能自批危险写。
+- 缓存：reject 注入是反思 user 轮(append-only，不变式 #3)；critic 子 agent 跑在**自己的 child context**，裁决前不污染父前缀。
+
+**M3.5c — CLI + eval**
+- `myagent agent --critic`(可带 `--critic-instructions "<...>"`)透传到 `QueryOptions.critic`。
+- eval 新任务：模型"完成"一个**微妙错误**的答案 → critic reject → 模型修 → critic approve；断言 bounce 发生 + 最终 approve；FakeModel 脚本 critic verdict `[reject, approve]`。
+
+#### 已定的设计抉择（M3.5）
+- **抽象**：单闸门泛化为 `DoneGate` 链，verify/critic 是两个实例；单 gate 退化 = 零行为变化。
+- **顺序**：verify 先、critic 后(fail-fast on cheap)。
+- **bounce**：全链共享一个上限计数器。
+- **critic 执行**：前台同步、只读 `verifier` 子 agent、自有 child context；opt-in，默认关。
+
+### M3.2c — opt-in LLM 摘要器（语义压缩）
+
+> 中爆炸半径(碰缓存 + 引入非确定)，注入点 §1 M3.2c 已设计形状，本节定实现契约。
+
+**契约**：`compactMessagesTiered(messages, { summarizer })`，`summarizer?: (dropped: readonly Message[]) => Promise<string>`(镜像 M1.4 `archiver` + FakeModel 模式)。
+
+**如何与确定性层组合**(关键，避免破坏工具配对)：
+- 摘要器**只作用于陈旧区**(根任务之后、近期窗口之前)，把这段**整轮**替换为一条合成 recap 消息 `[compacted summary of N earlier turns]: <recap>`。
+- 根任务 + 近期窗口**逐字保留**。陈旧区按**轮边界**整块切→替换为一条消息 → tool_use/tool_result 配对天然保持。
+- **确定性指针化仍是默认**(summarizer 未注入时走 M3.2a 原路)。摘要器纯 opt-in。
+
+**确定性 / 缓存**：
+- 测试注入脚本化 fake summarizer(返回固定串)，新 eval 任务断言 recap 消息存在 + token 下降 + 配对完整(不变式 #2)。
+- 摘要 = 一次压缩 = 一次摊销缓存重置(不变式 #1)——与确定性压缩**同样只重置一次**，只是压得更狠。复用 `query.cache_prefix_reset` mark。
+
+**CLI**：`myagent agent --semantic-compaction` 时，用 `options.model`/`ToolContext.model` 构造一个 model-backed summarizer(便宜模型、有界摘要 prompt)注入压缩路径。
+
+#### 已定的设计抉择（M3.2c）
+- **作用域**：仅陈旧区、按轮边界整块替换为一条 recap；根任务 + 近期窗口逐字。
+- **默认**：确定性指针化(M3.2a)仍为默认；摘要器纯 opt-in seam。
+- **缓存**：语义摘要与确定性压缩同属一次摊销重置，不新增缓存代价类别。
+
+### M3.6 — 并发上限 + 优雅 kill（砍 DAG）
+
+> §3 后台收尾。只做"队列(并发上限)+ 优雅生命周期"，**不做拓扑(DAG)**。
+
+**M3.6a — 并发上限**
+- config `maxConcurrentBackgroundTasks`(默认 0 = 不限，**非破坏**；opt-in 设上限)。
+- RUNNING 任务计数信号量；超额新任务停在 `pending`(FIFO 排队)，有 slot 释放(任务进终态)再准入下一个。
+- **作用域诚实**：准入控制只对**进程内 managed 任务**(`startManagedTask`/local_agent，我们掌控准入点)强保证；detached `local_bash` worker 是跨进程独立 spawn，本季只在同一调度器内尽力计数，**跨进程硬上限留作已知局限**(文档标注，类比 remote auth 的 Windows 文件权限降级)。
+
+**M3.6b — 优雅 kill**
+- 进程内任务：经 `AbortSignal`(query 循环已接 `abortSignal`)协作式取消 → 干净。
+- detached worker(有 pid)：SIGTERM → `killGraceMs` 宽限 → SIGKILL。
+- **Windows 降级**：Win 无真 SIGTERM(`child.kill` 走 TerminateProcess) → 优雅 kill 在 Windows 退化为即时终止(文档标注)。
+
+**M3.6c — tests**
+- 并发：起 N+1 个 managed 任务、cap=N，断言第 N+1 个停在 pending 直到一个完成才转 running。
+- kill：起一个长任务 → 优雅 kill → 断言走 SIGTERM(mock executor 捕获信号)/AbortSignal、终态 `killed`。
+
+#### 已定的设计抉择（M3.6）
+- **DAG**：砍。理由见上"明确砍掉"。
+- **并发上限**：默认不限(非破坏)，opt-in；进程内 managed 任务强保证，detached 跨进程留已知局限。
+- **优雅 kill**：进程内 AbortSignal、detached SIGTERM→grace→SIGKILL、Windows 退化即时终止(均文档标注)。
+
 ## 当前实现边界速查（探索阶段确认）
 
 - 消息**完全没有** `cache_control`（`anthropic.ts` 直接 `toAnthropicMessages(request.messages)`）。

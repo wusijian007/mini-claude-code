@@ -72,6 +72,17 @@ export type QueryOptions = {
    */
   verify?: VerifyConfig;
   /**
+   * M3.5 — Finalize Critic gate. When set, the completion path runs a
+   * read-only "critic" model call (no tools given -> read-only by
+   * construction) that judges whether the final answer actually satisfies the
+   * root task. APPROVE -> the run completes; REJECT -> the critique is injected
+   * as a reflective user turn and the loop continues a revise cycle. This is
+   * the SECOND gate in the Definition-of-Done chain: structural `verify` runs
+   * first (cheap, exit-code), then the critic (one model call). The chain
+   * shares one bounce budget; exceeding it ends with `verification_failed`.
+   */
+  critic?: CriticConfig;
+  /**
    * M3.4 — turn-boundary task inbox. When true and `toolContext.taskStore` +
    * `toolContext.startedBackgroundTaskIds` are present, the loop drains
    * THIS-run background tasks that have reached a terminal state into a
@@ -87,6 +98,52 @@ export type VerifyConfig = {
   when?: "on_terminal";
   maxBounces?: number;
 };
+
+export type CriticConfig = {
+  /** Shared with verify's budget at the chain level; see `maxDoneBounces`. */
+  maxBounces?: number;
+  /** Model the critic call uses. Defaults to the query's own model. */
+  model?: ModelClient;
+  /** Model name for the critic call. Defaults to the query's modelName. */
+  modelName?: string;
+  /** Max tokens for the critic's verdict. Defaults to 512. */
+  maxTokens?: number;
+  /** Extra review criteria appended to the critic's system prompt. */
+  instructions?: string;
+};
+
+/**
+ * One link in the Definition-of-Done chain (M3.5). The completion path runs
+ * gates in order; the first that does not pass injects a reflective user turn
+ * and the loop continues. `check` returns a normalized result so the loop can
+ * emit observability, inject the reflection, and bound bounces uniformly across
+ * structural verify and the semantic critic.
+ */
+type DoneGate = {
+  name: string;
+  check(args: { messages: readonly Message[]; turn: number; bounce: number }): Promise<DoneGateCheck>;
+};
+
+type DoneGateCheck = {
+  /** Observability event yielded regardless of pass/fail. */
+  event: LoopEvent;
+  passed: boolean;
+  /** Reflective user-turn content injected on failure (not a raw dump). */
+  reflection: string;
+  /** Profile mark name + data recorded on a failure bounce. */
+  profileMark: string;
+  profileData: Record<string, unknown>;
+  /** Terminal `verification_failed` reason/detail when the budget is exhausted. */
+  terminalReason: string;
+  terminalError?: string;
+};
+
+const CRITIC_SYSTEM_PROMPT =
+  "You are a meticulous reviewer acting as the final gate before an answer is delivered. " +
+  "You did not do the work; your only job is to judge whether the assistant's final answer " +
+  "correctly and completely satisfies the task. Be strict about unmet requirements, unsupported " +
+  "claims, hallucinated file paths or APIs, and answers that merely describe intent rather than " +
+  "completed work. Do not nitpick style. Reply with exactly `APPROVE`, or `REJECT: <one-line reason>`.";
 
 const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_CONTEXT_BUDGET_TOKENS = 24_000;
@@ -124,7 +181,15 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
   const proactiveTargetRatio = options.proactiveCompactionTargetRatio ?? 0.5;
   const proactiveSoftLimit = Math.floor(contextBudgetTokens * proactiveSoftLimitRatio);
   const proactiveTarget = Math.floor(contextBudgetTokens * proactiveTargetRatio);
-  let verifyBounces = 0;
+  // M3.5 — Definition-of-Done chain shares ONE bounce budget across gates so a
+  // task that flaps between gates can't loop forever. The budget is the max of
+  // any configured gate's maxBounces (default 2); with only verify configured
+  // this equals the old verify.maxBounces, preserving M3.3 behavior exactly.
+  const maxDoneBounces = Math.max(
+    options.verify ? options.verify.maxBounces ?? 2 : 0,
+    options.critic ? options.critic.maxBounces ?? 2 : 0
+  );
+  let gateBounces = 0;
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -136,6 +201,19 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
     tools: options.toolContext.tools ?? options.tools,
     profile: options.toolContext.profile ?? options.profile
   };
+
+  // M3.5 — assemble the Definition-of-Done gate chain. Order matters: the cheap
+  // deterministic structural verify runs first (fail-fast on a non-compiling
+  // answer), the expensive semantic critic second.
+  const doneGates: DoneGate[] = [];
+  if (options.verify && (options.verify.when ?? "on_terminal") === "on_terminal") {
+    doneGates.push(createVerifyGate(options.verify, toolContext));
+  }
+  if (options.critic) {
+    doneGates.push(
+      createCriticGate(options.critic, options.model, modelName, maxTokens)
+    );
+  }
 
   if (options.abortSignal?.aborted) {
     yield {
@@ -198,67 +276,41 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
 
       const toolUses = extractToolUses(responseMessage);
       if (toolUses.length === 0) {
-        // M3.3 — structural verification gate. The model thinks it's done;
-        // before completing, run the configured verify command. On failure,
-        // inject the failure as a reflective user turn and keep looping
-        // (edit -> test -> fix), bounded by maxBounces.
-        if (options.verify && (options.verify.when ?? "on_terminal") === "on_terminal") {
-          const maxBounces = options.verify.maxBounces ?? 2;
-          const args = options.verify.args ?? [];
-          const displayCommand = [options.verify.command, ...args].join(" ").trim();
-          const executor = toolContext.executor ?? createSpawnExecutor();
-          const result = await executor
-            .run({
-              command: options.verify.command,
-              args,
-              cwd: toolContext.cwd,
-              timeoutMs: 120_000,
-              outputSink: { kind: "capture", maxBytes: 4_000 }
-            })
-            .catch((error: unknown) => ({
-              exitCode: null as number | null,
-              stdout: "",
-              stderr: error instanceof Error ? error.message : String(error),
-              timedOut: false
-            }));
-          const passed = result.exitCode === 0;
-          yield {
-            type: "verification",
-            passed,
-            exitCode: result.exitCode,
-            command: displayCommand,
-            bounce: verifyBounces,
-            turn
-          };
-
-          if (passed) {
-            yield { type: "terminal_state", state: { status: "completed" } };
-            return;
+        // M3.5 — Definition-of-Done gate chain. The model stopping tool calls
+        // is "I think I'm done", a natural gate, not "done". Each configured
+        // gate must pass; the first that fails injects a reflective user turn
+        // and the loop continues (edit -> test/critique -> fix), bounded by a
+        // shared bounce budget. With no gates this is the plain completion.
+        if (doneGates.length > 0) {
+          let gateFailed = false;
+          for (const gate of doneGates) {
+            const check = await gate.check({ messages, turn, bounce: gateBounces });
+            yield check.event;
+            if (check.passed) {
+              continue;
+            }
+            // Fail-fast: a gate rejected. Give up if the budget is spent or we
+            // are on the last allowed turn; otherwise inject and revise.
+            gateFailed = true;
+            if (gateBounces >= maxDoneBounces || turn >= maxTurns - 1) {
+              yield {
+                type: "terminal_state",
+                state: {
+                  status: "verification_failed",
+                  reason: check.terminalReason,
+                  error: check.terminalError
+                }
+              };
+              return;
+            }
+            gateBounces += 1;
+            options.profile?.mark(check.profileMark, check.profileData);
+            messages.push({ role: "user", content: check.reflection });
+            break;
           }
-
-          if (verifyBounces >= maxBounces || turn >= maxTurns - 1) {
-            yield {
-              type: "terminal_state",
-              state: {
-                status: "verification_failed",
-                reason: `verification command "${displayCommand}" failed after ${verifyBounces} fix attempt(s)`,
-                error: combineVerifyOutput(result.stdout, result.stderr)
-              }
-            };
-            return;
+          if (gateFailed) {
+            continue;
           }
-
-          verifyBounces += 1;
-          options.profile?.mark("query.verify_bounce", {
-            turn,
-            bounce: verifyBounces,
-            exitCode: result.exitCode
-          });
-          messages.push({
-            role: "user",
-            content: reflectiveVerifyFailure(displayCommand, result.exitCode, result.stdout, result.stderr)
-          });
-          continue;
         }
 
         yield {
@@ -515,6 +567,170 @@ function reflectiveVerifyFailure(
     "",
     "Locate the cause and fix it. I will re-run the same verification after your next changes."
   ].join("\n");
+}
+
+/**
+ * Gate 1 of the Definition-of-Done chain: structural verification. Runs the
+ * configured command via the executor seam (NOT the whitelisted Bash tool) and
+ * passes on exit 0. This is the M3.3 behavior, now packaged as a `DoneGate`.
+ */
+function createVerifyGate(verify: VerifyConfig, toolContext: ToolContext): DoneGate {
+  const args = verify.args ?? [];
+  const displayCommand = [verify.command, ...args].join(" ").trim();
+  return {
+    name: "verify",
+    async check({ turn, bounce }) {
+      const executor = toolContext.executor ?? createSpawnExecutor();
+      const result = await executor
+        .run({
+          command: verify.command,
+          args,
+          cwd: toolContext.cwd,
+          timeoutMs: 120_000,
+          outputSink: { kind: "capture", maxBytes: 4_000 }
+        })
+        .catch((error: unknown) => ({
+          exitCode: null as number | null,
+          stdout: "",
+          stderr: error instanceof Error ? error.message : String(error),
+          timedOut: false
+        }));
+      const passed = result.exitCode === 0;
+      return {
+        event: {
+          type: "verification",
+          passed,
+          exitCode: result.exitCode,
+          command: displayCommand,
+          bounce,
+          turn
+        },
+        passed,
+        reflection: reflectiveVerifyFailure(displayCommand, result.exitCode, result.stdout, result.stderr),
+        profileMark: "query.verify_bounce",
+        profileData: { turn, bounce: bounce + 1, exitCode: result.exitCode },
+        terminalReason: `verification command "${displayCommand}" failed after ${bounce} fix attempt(s)`,
+        terminalError: combineVerifyOutput(result.stdout, result.stderr)
+      };
+    }
+  };
+}
+
+/**
+ * Gate 2 of the Definition-of-Done chain: the Finalize Critic. A read-only
+ * model call (no tools given -> read-only by construction; core cannot import
+ * the Agent tool, so this tool-less call is the layer-safe realization of the
+ * "read-only verifier" idea) that judges whether the final answer satisfies the
+ * root task. It runs in its own child context (a single synthesized message),
+ * so it does not pollute the parent prefix until the reflective turn is
+ * appended on rejection.
+ */
+function createCriticGate(
+  critic: CriticConfig,
+  fallbackModel: ModelClient,
+  fallbackModelName: string,
+  _fallbackMaxTokens: number
+): DoneGate {
+  return {
+    name: "critic",
+    async check({ messages, turn, bounce }) {
+      const verdict = await runCritic({
+        model: critic.model ?? fallbackModel,
+        modelName: critic.modelName ?? fallbackModelName,
+        maxTokens: critic.maxTokens ?? 512,
+        task: firstUserText(messages),
+        answer: lastAssistantText(messages),
+        instructions: critic.instructions
+      });
+      return {
+        event: {
+          type: "critic",
+          passed: verdict.approved,
+          reason: verdict.reason,
+          bounce,
+          turn
+        },
+        passed: verdict.approved,
+        reflection: reflectiveCriticRejection(verdict.reason),
+        profileMark: "query.critic_bounce",
+        profileData: { turn, bounce: bounce + 1 },
+        terminalReason: `finalize critic rejected the answer after ${bounce} revision(s): ${verdict.reason}`,
+        terminalError: verdict.reason
+      };
+    }
+  };
+}
+
+type RunCriticOptions = {
+  model: ModelClient;
+  modelName: string;
+  maxTokens: number;
+  task: string;
+  answer: string;
+  instructions?: string;
+};
+
+async function runCritic(options: RunCriticOptions): Promise<{ approved: boolean; reason: string }> {
+  const system = options.instructions
+    ? `${CRITIC_SYSTEM_PROMPT}\n\nAdditional review criteria:\n${options.instructions}`
+    : CRITIC_SYSTEM_PROMPT;
+  const userContent = [
+    "Task given to the assistant:",
+    options.task || "(no task captured)",
+    "",
+    "The assistant's final answer:",
+    options.answer || "(empty answer)",
+    "",
+    "Does the final answer correctly and completely satisfy the task?",
+    "Reply with exactly `APPROVE`, or `REJECT: <one-line reason>`."
+  ].join("\n");
+  const message = await collectModelTurn(
+    options.model.stream({
+      messages: [{ role: "user", content: userContent }],
+      model: options.modelName,
+      maxTokens: options.maxTokens,
+      system,
+      tools: []
+    })
+  );
+  return parseCriticVerdict(messageContentToText(message.content));
+}
+
+/**
+ * Parses the critic's verdict. A clear `REJECT` (anywhere) fails the gate; the
+ * one-line reason is the rest of that line. Anything else is treated as
+ * approval — the shared bounce budget caps the loop, so failing toward approval
+ * on an ambiguous verdict avoids wasting revisions on a confused critic.
+ */
+function parseCriticVerdict(text: string): { approved: boolean; reason: string } {
+  const trimmed = text.trim();
+  const rejectMatch = /\bREJECT\b\s*:?\s*(.*)/i.exec(trimmed);
+  if (rejectMatch) {
+    return { approved: false, reason: rejectMatch[1].trim() || "no reason given" };
+  }
+  return { approved: true, reason: trimmed.split("\n", 1)[0]?.trim() || "approved" };
+}
+
+function reflectiveCriticRejection(reason: string): string {
+  return [
+    `A review of your final answer did not pass: ${reason || "the answer does not fully satisfy the task."}`,
+    "",
+    "Address the issue and produce a corrected final answer. I will review it again."
+  ].join("\n");
+}
+
+function firstUserText(messages: readonly Message[]): string {
+  const first = messages.find((message) => message.role === "user");
+  return first ? messageContentToText(first.content) : "";
+}
+
+function lastAssistantText(messages: readonly Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "assistant") {
+      return messageContentToText(messages[i].content);
+    }
+  }
+  return "";
 }
 
 type CollectModelTurnWithRetryOptions = {
