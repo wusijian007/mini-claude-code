@@ -10,6 +10,8 @@ import {
   type CostRates,
   type FakeModelStep,
   type LoopEvent,
+  type Message,
+  type MessageSummarizer,
   type ModelUsage,
   type PermissionMode,
   type TerminalState,
@@ -83,6 +85,8 @@ type EvalTask = {
   permissionMode: PermissionMode;
   maxTurns?: number;
   contextBudgetTokens?: number;
+  /** Pre-seed the conversation (e.g. a stale history for compaction tasks). Defaults to [{user, prompt}]. */
+  initialMessages?: Message[];
   verify?: VerifyConfig;
   executor?: CommandExecutor;
   /** Seed a completed background task this run "started", to exercise the M3.4 inbox. */
@@ -90,6 +94,8 @@ type EvalTask = {
   /** Scripted critic verdicts; when present, runs the M3.5 Finalize Critic gate with its own FakeModel. */
   criticScript?: FakeModelStep[];
   criticMaxBounces?: number;
+  /** Fake LLM summarizer; when present, proactive compaction takes the M3.2c semantic path. */
+  compactionSummarizer?: MessageSummarizer;
   script: FakeModelStep[];
   validate(fixtureDir: string, events: readonly LoopEvent[]): Promise<string[]>;
 };
@@ -125,7 +131,7 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
       : undefined;
     const events = await collectQuery({
       model: new FakeModel(task.script),
-      initialMessages: [{ role: "user", content: task.prompt }],
+      initialMessages: task.initialMessages ?? [{ role: "user", content: task.prompt }],
       tools: toolRegistry,
       toolContext: { cwd: fixtureDir, executor: task.executor, taskStore, startedBackgroundTaskIds },
       permissionMode: task.permissionMode,
@@ -133,6 +139,7 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
       contextBudgetTokens: task.contextBudgetTokens,
       verify: task.verify,
       critic,
+      compactionSummarizer: task.compactionSummarizer,
       drainBackgroundTasks: Boolean(task.seedBackgroundTask)
     });
 
@@ -280,6 +287,9 @@ function usage(
 }
 
 function createEvalTasks(): EvalTask[] {
+  // Captured by the semantic-compaction task so validate() can assert the
+  // opt-in LLM summarizer seam was actually invoked (M3.2c).
+  let semanticSummarizerCalls = 0;
   return [
     {
       taskId: "read-only-analysis",
@@ -580,6 +590,69 @@ function createEvalTasks(): EvalTask[] {
         return rejectedThenApproved
           ? []
           : ["expected critic to reject once then approve after the revision"];
+      }
+    },
+    {
+      taskId: "semantic-compaction",
+      title: "Opt-in LLM semantic compaction summarizes stale turns (M3.2c)",
+      category: "compaction",
+      prompt: "Continue the analysis.",
+      permissionMode: "plan",
+      contextBudgetTokens: 2_000,
+      // Seed a real stale HISTORY (root task + an early Read whale + a few
+      // turns) so the summarize-and-drop path has something to condense. One
+      // more tool turn pushes the whale out of the recent window; semantic
+      // compaction then replaces the stale region with the fake LLM recap.
+      initialMessages: [
+        { role: "user", content: "Analyze the fixture project end to end." },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Reading the large file first." },
+            { type: "tool_use", toolUse: { id: "seed_big", name: "Read", input: { path: "src/big.txt" } } }
+          ]
+        },
+        {
+          role: "tool",
+          content: [
+            { type: "tool_result", result: { toolUseId: "seed_big", status: "success", content: "X".repeat(8_000) } }
+          ]
+        },
+        { role: "assistant", content: "It is a large filler file." },
+        { role: "user", content: "Keep going." },
+        { role: "assistant", content: "Will do." },
+        { role: "user", content: "Now finish the analysis." }
+      ],
+      compactionSummarizer: async (dropped) => {
+        semanticSummarizerCalls += 1;
+        return `RECAP: condensed ${dropped.length} earlier turn(s) of the analysis.`;
+      },
+      script: [
+        {
+          type: "assistant_message",
+          content: "Reading one more file before summarizing.",
+          usage: usage(900, 30, 0, 0)
+        },
+        { type: "tool_use", toolUse: { id: "ev_sem_r", name: "Read", input: { path: "README.md" } } },
+        { type: "turn_break" },
+        {
+          type: "assistant_message",
+          content: "Analysis complete.",
+          usage: usage(300, 40, 0, 0)
+        }
+      ],
+      async validate(_fixtureDir, events) {
+        const notes: string[] = [];
+        const compacted = events.some(
+          (e) => e.type === "compaction" && e.reason === "proactive" && e.afterTokens < e.beforeTokens
+        );
+        if (!compacted) {
+          notes.push("semantic compaction did not fire on the oversized transcript");
+        }
+        if (semanticSummarizerCalls < 1) {
+          notes.push("the opt-in LLM summarizer seam was not invoked");
+        }
+        return notes;
       }
     }
   ];

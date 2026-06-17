@@ -1,7 +1,9 @@
 import {
   compactMessages,
   compactMessagesTiered,
-  estimateMessagesTokens
+  compactMessagesWithSummary,
+  estimateMessagesTokens,
+  type MessageSummarizer
 } from "./context.js";
 import {
   DEFAULT_MAX_TOKENS,
@@ -60,6 +62,15 @@ export type QueryOptions = {
    */
   proactiveCompactionSoftLimitRatio?: number;
   proactiveCompactionTargetRatio?: number;
+  /**
+   * M3.2c — opt-in semantic compaction. When set, proactive compaction
+   * REPLACES the stale region with a single LLM-written recap (via
+   * `compactMessagesWithSummary`) instead of the default deterministic
+   * pointer-ization. Non-deterministic + costs a model call, so it is purely
+   * opt-in (CLI `--semantic-compaction`); tests inject a scripted fake. The
+   * deterministic default path is untouched when this is absent.
+   */
+  compactionSummarizer?: MessageSummarizer;
   /**
    * M3.3 — structural verification gate. When set, the agent loop does not
    * complete the moment the model stops calling tools: it first runs
@@ -391,7 +402,14 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
       if (proactiveSoftLimitRatio > 0) {
         const beforeTokens = estimateMessagesTokens(messages);
         if (beforeTokens > proactiveSoftLimit) {
-          const compacted = compactMessagesTiered(messages, { targetTokens: proactiveTarget });
+          // M3.2c — semantic recap when a summarizer is injected, else the
+          // default deterministic tiered pointer-ization.
+          const compacted = options.compactionSummarizer
+            ? await compactMessagesWithSummary(messages, {
+                targetTokens: proactiveTarget,
+                summarizer: options.compactionSummarizer
+              })
+            : compactMessagesTiered(messages, { targetTokens: proactiveTarget });
           const afterTokens = estimateMessagesTokens(compacted);
           if (afterTokens < beforeTokens) {
             messages.splice(0, messages.length, ...compacted);
@@ -406,7 +424,9 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
               turn,
               beforeTokens,
               afterTokens,
-              reason: "proactive_compaction"
+              reason: options.compactionSummarizer
+                ? "proactive_compaction_semantic"
+                : "proactive_compaction"
             });
             yield {
               type: "compaction",
@@ -731,6 +751,40 @@ function lastAssistantText(messages: readonly Message[]): string {
     }
   }
   return "";
+}
+
+const COMPACTION_SUMMARY_PROMPT =
+  "You are compacting a long agent transcript to fit a context budget. Summarize the earlier " +
+  "turns below into a concise recap that preserves: the goal, key decisions, files/commands " +
+  "touched, important findings, and anything still needed to continue the task. Be factual and " +
+  "dense; omit pleasantries and do not invent details.";
+
+/**
+ * M3.2c — builds a model-backed {@link MessageSummarizer} for semantic
+ * compaction. The CLI's `--semantic-compaction` flag wires this to the agent's
+ * own model client, so no extra credentials are needed. Kept in core so the
+ * model-call shape lives next to the loop that consumes it.
+ */
+export function createModelCompactionSummarizer(
+  model: ModelClient,
+  modelName: string,
+  options: { maxTokens?: number } = {}
+): MessageSummarizer {
+  const maxTokens = options.maxTokens ?? 1024;
+  return async (dropped) => {
+    const transcript = dropped
+      .map((message) => `${message.role.toUpperCase()}: ${messageContentToText(message.content)}`)
+      .join("\n\n");
+    const message = await collectModelTurn(
+      model.stream({
+        messages: [{ role: "user", content: `${COMPACTION_SUMMARY_PROMPT}\n\n---\n${transcript}` }],
+        model: modelName,
+        maxTokens,
+        tools: []
+      })
+    );
+    return messageContentToText(message.content).trim();
+  };
 }
 
 type CollectModelTurnWithRetryOptions = {

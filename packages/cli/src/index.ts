@@ -29,6 +29,7 @@ import {
   createProfileRecorder,
   createProfileStore,
   createSpawnExecutor,
+  createModelCompactionSummarizer,
   ensureRemoteAuthToken,
   markTaskKilled,
   ModelError,
@@ -87,7 +88,7 @@ Usage:
   myagent --version
   myagent --help
   myagent chat <prompt>
-  myagent agent [--permission-mode <plan|default|bypassPermissions>] [--skill <name>] [--verify "<command>"] [--critic [--critic-instructions "<text>"]] <prompt>
+  myagent agent [--permission-mode <plan|default|bypassPermissions>] [--skill <name>] [--verify "<command>"] [--critic [--critic-instructions "<text>"]] [--semantic-compaction] <prompt>
   myagent tui
   myagent memory <path|list|save>
   myagent skill <list|show>
@@ -108,6 +109,7 @@ Week 18 scope:
   agent <prompt> runs the safe tool loop with Read, Glob, Grep, read-only Bash, Edit, and Write.
   agent --verify "<command>" runs a verification gate when the model finishes: on non-zero exit the failure is fed back for a bounded edit->test->fix loop.
   agent --critic adds a read-only Finalize Critic that judges the final answer (the second Definition-of-Done gate after --verify): on REJECT the critique is fed back for a bounded revise loop.
+  agent --semantic-compaction makes proactive compaction summarize stale turns with an LLM recap (opt-in) instead of the default deterministic pointer-ization.
   agent reserves its final turn for a concise answer instead of stopping cold at max_turns.
   tui starts an interactive terminal session with history, slash commands, permissions, and Ctrl+C.
   memory save <taxonomy> <content> writes long-term memory under .myagent/projects/<project>/memory.
@@ -1286,7 +1288,8 @@ async function runAgent(
     dependencies,
     skillNames: parsedArgs.skillNames,
     verify: parseVerifyConfig(parsedArgs.verifyCommand),
-    critic: parseCriticConfig(parsedArgs)
+    critic: parseCriticConfig(parsedArgs),
+    semanticCompaction: parsedArgs.semanticCompaction
   });
   return result.exitCode;
 }
@@ -1744,6 +1747,7 @@ type RunAgentTurnOptions = {
   skillNames?: readonly string[];
   verify?: VerifyConfig;
   critic?: CriticConfig;
+  semanticCompaction?: boolean;
   requestPermission?: (request: PermissionRequest) => Promise<PermissionDecision> | PermissionDecision;
   profile?: ProfileRecorder;
 };
@@ -1821,6 +1825,11 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
     const tools = await profile.time("tools.load", () =>
       Promise.resolve(options.tools ?? createProjectToolRegistryWithMcp(options.cwd, options.dependencies.mcpConfigPath))
     );
+    // M3.2c — opt-in semantic compaction wires the agent's own model client as
+    // the summarizer; absent, proactive compaction stays deterministic.
+    const compactionSummarizer = options.semanticCompaction
+      ? createModelCompactionSummarizer(client, modelName)
+      : undefined;
     for await (const event of query({
       model: client,
       initialMessages: [...options.initialMessages, userMessage],
@@ -1847,6 +1856,7 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
       finalizeBeforeMaxTurns: true,
       verify: options.verify,
       critic: options.critic,
+      compactionSummarizer,
       drainBackgroundTasks: true,
       profile
     })) {
@@ -2110,6 +2120,7 @@ type ParsedAgentArgs =
       verifyCommand?: string;
       critic: boolean;
       criticInstructions?: string;
+      semanticCompaction: boolean;
     }
   | {
       ok: false;
@@ -2123,6 +2134,7 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
   let verifyCommand: string | undefined;
   let critic = false;
   let criticInstructions: string | undefined;
+  let semanticCompaction = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -2139,6 +2151,11 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
 
     if (arg === "--critic") {
       critic = true;
+      continue;
+    }
+
+    if (arg === "--semantic-compaction") {
+      semanticCompaction = true;
       continue;
     }
 
@@ -2189,7 +2206,8 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
     skillNames,
     verifyCommand,
     critic,
-    criticInstructions
+    criticInstructions,
+    semanticCompaction
   };
 }
 

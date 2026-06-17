@@ -210,6 +210,80 @@ function summarizeToolInput(input: Record<string, unknown>): string {
   return json.length > 80 ? `${json.slice(0, 80)}...` : json;
 }
 
+/** M3.2c — async LLM summarizer seam: condenses the dropped stale turns into a recap. */
+export type MessageSummarizer = (dropped: readonly Message[]) => Promise<string>;
+
+export type SummarizeCompactOptions = {
+  targetTokens?: number;
+  /** Messages at the head kept verbatim (the root task). Default 1. */
+  rootMessages?: number;
+  /** Messages at the tail kept verbatim (recent, most-relevant). Default 6. */
+  recentWindowMessages?: number;
+  /** Required: condenses the dropped stale turns into a single recap string. */
+  summarizer: MessageSummarizer;
+  archiveSink?: (omitted: readonly Message[]) => void;
+};
+
+/**
+ * M3.2c — opt-in semantic (LLM) compaction. Where {@link compactMessagesTiered}
+ * shrinks stale messages in place (deterministic, pointer-izing the whales),
+ * this REPLACES the whole stale region with a single LLM-written recap message —
+ * recovering the reasoning/prose that pointers cannot. The default deterministic
+ * path is untouched; this only runs when a `summarizer` is injected (CLI
+ * `--semantic-compaction`).
+ *
+ * Boundary safety: the recent-window start is snapped earlier past any leading
+ * `tool_result` (role "tool") message, so a kept tool_result never gets its
+ * originating tool_use dropped into the summarized block (no orphaned pairing).
+ * Root task + recent window stay verbatim.
+ *
+ * Like all compaction this is an amortized cache reset (it rewrites the prefix
+ * once); the summarizer is non-deterministic, so tests inject a scripted fake
+ * (invariant #2 — see docs/v3-kernel-roadmap.md §1 M3.2c).
+ */
+export async function compactMessagesWithSummary(
+  messages: readonly Message[],
+  options: SummarizeCompactOptions
+): Promise<Message[]> {
+  const target = options.targetTokens ?? 8_000;
+  const root = Math.max(0, options.rootMessages ?? 1);
+  const recent = Math.max(0, options.recentWindowMessages ?? 6);
+
+  // Already within budget — return untouched so the cached prefix survives.
+  if (estimateMessagesTokens(messages) <= target) {
+    return [...messages];
+  }
+
+  const n = messages.length;
+  // Snap recent-window start earlier past any leading tool_result so its
+  // originating tool_use is never orphaned in the dropped stale block.
+  let recentStart = Math.max(root, n - recent);
+  while (recentStart > root && messages[recentStart]?.role === "tool") {
+    recentStart -= 1;
+  }
+
+  const staleSlice = messages.slice(root, recentStart);
+  if (staleSlice.length === 0) {
+    // Everything is root or recent — there is no stale HISTORY to summarize
+    // yet (e.g. one big recent tool_result). Semantic compaction only condenses
+    // accumulated history; a pathological short-but-oversized transcript is left
+    // to the reactive prompt_too_long net (deterministic compactMessages).
+    return [...messages];
+  }
+
+  const recap = await options.summarizer(staleSlice);
+  options.archiveSink?.(staleSlice);
+
+  return [
+    ...messages.slice(0, root),
+    {
+      role: "assistant",
+      content: `[summary of ${staleSlice.length} earlier turn(s)]\n${recap}`
+    },
+    ...messages.slice(recentStart)
+  ];
+}
+
 export function compactMessages(
   messages: readonly Message[],
   options: CompactOptions = {}
