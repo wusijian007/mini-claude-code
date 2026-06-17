@@ -225,6 +225,14 @@ export type VerificationEvent = {
   turn: number;
 };
 
+export type CriticEvent = {
+  type: "critic";
+  passed: boolean;
+  reason: string;
+  bounce: number;
+  turn: number;
+};
+
 export type BackgroundTasksEvent = {
   type: "background_tasks";
   drained: ReadonlyArray<{ id: string; state: string; description: string }>;
@@ -238,4 +246,5 @@ export type LoopEvent =
   | TerminalStateEvent
   | CompactionEvent
   | VerificationEvent
+  | CriticEvent
   | BackgroundTasksEvent;
