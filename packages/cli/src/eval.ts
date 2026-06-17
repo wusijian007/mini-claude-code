@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   FakeModel,
   collectQuery,
+  createTaskStore,
   estimateUsageCostUsd,
   type CommandExecutor,
   type CostRates,
@@ -52,7 +53,8 @@ export type EvalTaskResult = {
     | "permission"
     | "sub_agent"
     | "compaction"
-    | "self_correction";
+    | "self_correction"
+    | "background";
   prompt: string;
   permissionMode: PermissionMode;
   transcriptPath: string;
@@ -82,6 +84,8 @@ type EvalTask = {
   contextBudgetTokens?: number;
   verify?: VerifyConfig;
   executor?: CommandExecutor;
+  /** Seed a completed background task this run "started", to exercise the M3.4 inbox. */
+  seedBackgroundTask?: { description: string; output: string };
   script: FakeModelStep[];
   validate(fixtureDir: string, events: readonly LoopEvent[]): Promise<string[]>;
 };
@@ -99,15 +103,27 @@ export async function runEvalSuite(options: EvalSuiteOptions): Promise<EvalSuite
   const tasks: EvalTaskResult[] = [];
   for (const task of createEvalTasks()) {
     const toolRegistry = createProjectToolRegistry();
+    // M3.4 — optionally seed a completed background task this run "started",
+    // so the turn-boundary inbox has something to drain (deterministic).
+    let taskStore: ReturnType<typeof createTaskStore> | undefined;
+    let startedBackgroundTaskIds: Set<string> | undefined;
+    if (task.seedBackgroundTask) {
+      taskStore = createTaskStore(fixtureDir);
+      const seeded = await taskStore.create({ type: "local_agent", description: task.seedBackgroundTask.description, cwd: fixtureDir });
+      await taskStore.appendOutput(seeded.id, task.seedBackgroundTask.output);
+      await taskStore.patch(seeded.id, (r) => ({ ...r, state: "completed", endedAt: new Date().toISOString() }));
+      startedBackgroundTaskIds = new Set([seeded.id]);
+    }
     const events = await collectQuery({
       model: new FakeModel(task.script),
       initialMessages: [{ role: "user", content: task.prompt }],
       tools: toolRegistry,
-      toolContext: { cwd: fixtureDir, executor: task.executor },
+      toolContext: { cwd: fixtureDir, executor: task.executor, taskStore, startedBackgroundTaskIds },
       permissionMode: task.permissionMode,
       maxTurns: task.maxTurns ?? 8,
       contextBudgetTokens: task.contextBudgetTokens,
-      verify: task.verify
+      verify: task.verify,
+      drainBackgroundTasks: Boolean(task.seedBackgroundTask)
     });
 
     const terminalState = finalTerminalState(events);
@@ -499,6 +515,28 @@ function createEvalTasks(): EvalTask[] {
         return failedThenPassed
           ? []
           : ["expected verify to fail once then pass after the fix bounce"];
+      }
+    },
+    {
+      taskId: "background-inbox",
+      title: "Turn-boundary inbox drains a completed background task into context",
+      category: "background",
+      prompt: "Kick off a background search, keep working, then use its result.",
+      permissionMode: "plan",
+      // A pre-completed background task this run "started"; the inbox should
+      // drain it at the turn boundary after the first tool turn.
+      seedBackgroundTask: { description: "background grep", output: "FOUND: 3 matches in src/" },
+      script: [
+        { type: "assistant_message", content: "Started the search; reading something meanwhile.", usage: usage(700, 30, 0, 0) },
+        { type: "tool_use", toolUse: { id: "ev_bg_read", name: "Read", input: { path: "README.md" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "Background result is in; done.", usage: usage(350, 40, 0, 0) }
+      ],
+      async validate(_fixtureDir, events) {
+        const drained = events.some(
+          (e) => e.type === "background_tasks" && e.drained.length === 1 && e.drained[0].state === "completed"
+        );
+        return drained ? [] : ["background task was not drained into context at the turn boundary"];
       }
     }
   ];

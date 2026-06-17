@@ -91,6 +91,15 @@ export type ToolContext = {
    * plugs in here.
    */
   executor?: CommandExecutor;
+  /**
+   * Shared, mutable set of background-task ids started during THIS query run
+   * (populated by the Agent tool's background sub-agent path). The query
+   * loop's turn-boundary task inbox (M3.4) drains only these — never leftover
+   * or CLI-started tasks sitting in the store. The per-turn ToolContext is a
+   * shallow spread, so this Set's reference (and mutations to it) is shared
+   * across the whole run; do not replace it, only add to it.
+   */
+  startedBackgroundTaskIds?: Set<string>;
   subAgentDepth?: number;
   maxSubAgentDepth?: number;
   recordForkTrace?: (trace: ForkTrace) => Promise<void> | void;
@@ -216,10 +225,17 @@ export type VerificationEvent = {
   turn: number;
 };
 
+export type BackgroundTasksEvent = {
+  type: "background_tasks";
+  drained: ReadonlyArray<{ id: string; state: string; description: string }>;
+  turn: number;
+};
+
 export type LoopEvent =
   | AssistantMessageEvent
   | ToolUseEvent
   | ToolResultEvent
   | TerminalStateEvent
   | CompactionEvent
-  | VerificationEvent;
+  | VerificationEvent
+  | BackgroundTasksEvent;
