@@ -77,7 +77,9 @@ myagent 的模型客户端走**网关,不暴露 Anthropic 的 `cache_edits` beta
 把现有执行期落盘**也**表达为 cascade 的最便宜一层（请求前对超阈值的 tool_result 做转存兜底）；预览改为**头+尾 2KB 智能预览**（非纯前缀切片）；阈值可配（默认评估 8K→更大）；上报释放量。`Read` 取回不变（零损失）。
 **抉择**：保留执行期落盘（早转存早省）；cascade 层是"请求前再兜一次 + 智能预览"的补充,不重复转存（已转存的跳过）。
 
-### M4.2 — L2 历史 snip
+### M4.2 — L2 历史 snip ✅ 已交付
+
+> 已交付：`snipStaleToolScaffolding`（纯函数，在陈旧区把超阈值的 `tool_result` 内容 snip 成标记、保留 toolUseId/artifactPath；`tool_use`、散文、根任务+近期窗口原样）接为 cascade 第二层（`[spill, snip, reclaim]`）。**层分离**：L2 只动工具脚手架,散文留给 L5——为此把 `semantic-compaction` eval 与 M3.2c 集成测试的 whale 从 tool_result 改成 assistant 散文(L1/L2 跳过、只有 L5 能回收),指纹不变。3 个新测试(snip 单测 2 + 既有集成改 prose)。
 
 确定性丢弃**近期窗口外**的陈旧脚手架（旧 tool_use/result 对、冗长旧 assistant 文本）,保根任务 + 近期窗口逐字,保 tool 配对。向预算上报释放量。零成本。
 **抉择**：snip 只动窗口外；缓存稳定（只在缓存冷时改写前缀,见不变式 1，与 L3 共用冷暖判断）。

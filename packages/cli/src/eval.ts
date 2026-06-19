@@ -599,31 +599,20 @@ function createEvalTasks(): EvalTask[] {
       prompt: "Continue the analysis.",
       permissionMode: "plan",
       contextBudgetTokens: 2_000,
-      // Seed a real stale HISTORY (root task + an early Read whale + a few
-      // turns) so the summarize-and-drop path has something to condense. One
-      // more tool turn pushes the whale out of the recent window; semantic
-      // compaction then replaces the stale region with the fake LLM recap.
+      // Seed a real stale HISTORY whose whale is assistant PROSE/reasoning, not
+      // a tool_result — L1 spill and L2 snip both target tool scaffolding and
+      // leave prose alone, so only L5 (semantic recap) can reclaim it. That is
+      // the correct layer separation, and it keeps this task a genuine L5 test.
       // The turn-0 usage below reflects this seeded whale (~2.4K prompt tokens),
       // so the M4.0 usage anchor sees the prefix as genuinely large and the
       // pre-flight cascade fires — scripted usage must be consistent with seeded
       // content now that the trigger trusts server-reported token counts.
       initialMessages: [
         { role: "user", content: "Analyze the fixture project end to end." },
-        {
-          role: "assistant",
-          content: [
-            { type: "text", text: "Reading the large file first." },
-            { type: "tool_use", toolUse: { id: "seed_big", name: "Read", input: { path: "src/big.txt" } } }
-          ]
-        },
-        {
-          role: "tool",
-          content: [
-            { type: "tool_result", result: { toolUseId: "seed_big", status: "success", content: "X".repeat(8_000) } }
-          ]
-        },
-        { role: "assistant", content: "It is a large filler file." },
+        { role: "assistant", content: `Reasoning about the project: ${"detailed analysis prose. ".repeat(320)}` },
         { role: "user", content: "Keep going." },
+        { role: "assistant", content: "Noted; continuing." },
+        { role: "user", content: "Summarize the earlier reasoning." },
         { role: "assistant", content: "Will do." },
         { role: "user", content: "Now finish the analysis." }
       ],

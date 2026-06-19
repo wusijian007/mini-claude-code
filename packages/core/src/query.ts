@@ -5,6 +5,7 @@ import {
   estimateAnchoredTokens,
   estimateMessagesTokens,
   runCompactionPipeline,
+  snipStaleToolScaffolding,
   type CompactionStage,
   type MessageSummarizer,
   type UsageAnchor
@@ -443,6 +444,12 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
             thresholdChars: toolContext.toolResultBudgetChars ?? DEFAULT_SPILL_THRESHOLD_CHARS,
             previewChars: toolContext.toolResultPreviewChars ?? DEFAULT_SPILL_PREVIEW_CHARS
           });
+          // M4.2 (L2) — drop stale tool scaffolding (snip stale tool_result
+          // content). Cheaper than the reclaim stage; leaves prose for L5.
+          const snipStage: CompactionStage = {
+            name: "snip",
+            run: (msgs) => snipStaleToolScaffolding(msgs)
+          };
           const reclaimStage: CompactionStage = options.compactionSummarizer
             ? {
                 name: "auto_compact",
@@ -456,7 +463,7 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
                 name: "tiered",
                 run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
               };
-          const stages: CompactionStage[] = [spillStage, reclaimStage];
+          const stages: CompactionStage[] = [spillStage, snipStage, reclaimStage];
           const result = await runCompactionPipeline(messages, {
             stages,
             isUnderTarget: (msgs) => estimateMessagesTokens(msgs) <= proactiveTarget
