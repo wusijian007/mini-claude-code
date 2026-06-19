@@ -247,9 +247,10 @@ describe("query loop", () => {
 
   it("uses the LLM summarizer for proactive compaction when one is injected (M3.2c)", async () => {
     let summarizerCalls = 0;
-    // Seed a real stale history (root + an early whale + a couple of turns); one
-    // more tool turn pushes the whale out of the recent window so the semantic
-    // summarize-and-drop path has accumulated history to condense.
+    // Seed a real stale history whose whale is assistant PROSE (not a
+    // tool_result), so L1 spill and L2 snip both leave it alone and only L5
+    // (semantic recap) can reclaim it. One more tool turn pushes it out of the
+    // recent window so the summarize-and-drop path has history to condense.
     const events = await collectQuery({
       model: new FakeModel([
         { type: "tool_use", toolUse: { id: "tu_new", name: "Read", input: { path: "next.ts" } } },
@@ -258,22 +259,11 @@ describe("query loop", () => {
       ]),
       initialMessages: [
         { role: "user", content: "root task" },
-        {
-          role: "assistant",
-          content: [
-            { type: "text", text: "reading the big file" },
-            { type: "tool_use", toolUse: { id: "old_big", name: "Read", input: { path: "big.ts" } } }
-          ]
-        },
-        {
-          role: "tool",
-          content: [
-            { type: "tool_result", result: { toolUseId: "old_big", status: "success", content: "X".repeat(8_000) } }
-          ]
-        },
-        { role: "assistant", content: "it's big" },
+        { role: "assistant", content: `reasoning about the big file: ${"analysis prose. ".repeat(500)}` },
         { role: "user", content: "keep going" },
         { role: "assistant", content: "ok" },
+        { role: "user", content: "checkpoint" },
+        { role: "assistant", content: "sure" },
         { role: "user", content: "now finish" }
       ],
       tools: [readTool],

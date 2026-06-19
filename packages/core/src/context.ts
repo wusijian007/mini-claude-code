@@ -109,6 +109,59 @@ export async function runCompactionPipeline(
   return { messages: current, ranStages };
 }
 
+export type SnipScaffoldingOptions = {
+  /** Messages at the head kept verbatim (the root task). Default 1. */
+  rootMessages?: number;
+  /** Messages at the tail kept verbatim (recent, most-relevant). Default 6. */
+  recentWindowMessages?: number;
+  /** Stale tool_result content longer than this (chars) gets snipped to a marker. Default 200. */
+  snipOverChars?: number;
+};
+
+/**
+ * M4.2 (L2) — deterministically drop stale tool SCAFFOLDING. In the stale zone
+ * (outside the root task and the recent window) it replaces oversized
+ * `tool_result` content with a tiny marker — the dominant token cost of old
+ * tool turns — while leaving `tool_use` blocks (tiny), prose/reasoning text, and
+ * user turns ALONE. Prose is intentionally untouched: that is L5's job
+ * (semantic recap); L2 only reclaims the cheap, low-value tool apparatus.
+ * Pairing is always safe because blocks are snipped in place, never removed.
+ * The artifactPath (if any) is preserved so the full output stays restorable.
+ */
+export function snipStaleToolScaffolding(
+  messages: readonly Message[],
+  options: SnipScaffoldingOptions = {}
+): Message[] {
+  const root = Math.max(0, options.rootMessages ?? 1);
+  const recent = Math.max(0, options.recentWindowMessages ?? 6);
+  const snipOver = options.snipOverChars ?? 200;
+  const staleStart = root;
+  const staleEnd = Math.max(staleStart, messages.length - recent);
+
+  return messages.map((message, index) => {
+    if (index < staleStart || index >= staleEnd || !Array.isArray(message.content)) {
+      return message;
+    }
+    let changed = false;
+    const blocks = message.content.map((block) => {
+      if (block.type === "tool_result" && block.result.content.length > snipOver) {
+        changed = true;
+        return {
+          ...block,
+          result: {
+            ...block.result,
+            content: `[stale tool result snipped: ${block.result.content.length} chars${
+              block.result.artifactPath ? ` -> ${block.result.artifactPath}` : ""
+            }]`
+          }
+        };
+      }
+      return block;
+    });
+    return changed ? { ...message, content: blocks as MessageContent } : message;
+  });
+}
+
 export type TieredCompactOptions = {
   targetTokens?: number;
   /** Messages at the head kept verbatim (the root task). Default 1. */

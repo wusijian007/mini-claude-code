@@ -16,6 +16,7 @@ import {
   estimateMessagesTokens,
   runCompactionPipeline,
   smartPreview,
+  snipStaleToolScaffolding,
   type CompactionStage,
   executeToolUse,
   tokenBudgetFromUsage,
@@ -331,6 +332,76 @@ describe("L1 spill stage (M4.1)", () => {
 
     const out = await stage.run(messages);
     expect(out).toEqual(messages);
+  });
+});
+
+describe("L2 snip stale scaffolding (M4.2)", () => {
+  function transcript(): Message[] {
+    return [
+      { role: "user", content: "root task" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "I'll read it." },
+          { type: "tool_use", toolUse: { id: "tu", name: "Read", input: { path: "x.ts" } } }
+        ]
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", result: { toolUseId: "tu", status: "success", content: "L".repeat(5_000) } }]
+      },
+      { role: "assistant", content: `Reasoning prose worth keeping. ${"more reasoning. ".repeat(50)}` },
+      { role: "user", content: "recent one" },
+      { role: "user", content: "recent two" }
+    ];
+  }
+
+  it("snips stale tool_result content but leaves prose, tool_use, root and recent", () => {
+    const messages = transcript();
+    const out = snipStaleToolScaffolding(messages, {
+      rootMessages: 1,
+      recentWindowMessages: 2,
+      snipOverChars: 200
+    });
+
+    // Root task verbatim.
+    expect(out[0].content).toBe("root task");
+    // Stale tool_result snipped to a marker, pairing preserved (toolUseId intact).
+    const toolBlock = Array.isArray(out[2].content) ? out[2].content[0] : undefined;
+    expect(toolBlock && toolBlock.type === "tool_result").toBe(true);
+    if (toolBlock && toolBlock.type === "tool_result") {
+      expect(toolBlock.result.content).toContain("stale tool result snipped");
+      expect(toolBlock.result.toolUseId).toBe("tu");
+    }
+    // Stale tool_use block left intact (tiny scaffolding, not the token hog).
+    const asstBlocks = Array.isArray(out[1].content) ? out[1].content : [];
+    expect(asstBlocks.some((block) => block.type === "tool_use")).toBe(true);
+    // Stale PROSE left intact — that is L5's job, not L2's.
+    expect(String(out[3].content)).toContain("Reasoning prose worth keeping");
+    // Recent window verbatim.
+    expect(out[5].content).toBe("recent two");
+    // Real token reduction from snipping the stale tool_result whale.
+    expect(estimateMessagesTokens(out)).toBeLessThan(estimateMessagesTokens(messages));
+  });
+
+  it("preserves the artifactPath in the snip marker so the output stays restorable", () => {
+    const messages: Message[] = [
+      { role: "user", content: "root" },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool_result",
+            result: { toolUseId: "t", status: "success", content: "Z".repeat(5_000), artifactPath: "/spilled/x.txt" }
+          }
+        ]
+      },
+      { role: "user", content: "r1" },
+      { role: "user", content: "r2" }
+    ];
+    const out = snipStaleToolScaffolding(messages, { rootMessages: 1, recentWindowMessages: 2 });
+    const block = Array.isArray(out[1].content) ? out[1].content[0] : undefined;
+    expect(block && block.type === "tool_result" ? block.result.content : "").toContain("/spilled/x.txt");
   });
 });
 
