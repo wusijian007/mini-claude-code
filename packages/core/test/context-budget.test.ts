@@ -11,7 +11,10 @@ import {
   compactMessagesTiered,
   compactMessagesWithSummary,
   collectQuery,
+  estimateAnchoredTokens,
   estimateMessagesTokens,
+  runCompactionPipeline,
+  type CompactionStage,
   executeToolUse,
   tokenBudgetFromUsage,
   type Message,
@@ -238,6 +241,66 @@ describe("semantic compaction (M3.2c)", () => {
     });
     expect(out).toEqual(small);
     expect(called).toBe(false);
+  });
+});
+
+describe("usage anchor (M4.0)", () => {
+  it("anchors on the exact prompt tokens and estimates only the appended delta", () => {
+    const messages: Message[] = [
+      { role: "user", content: "root task" },
+      { role: "assistant", content: "old turn" },
+      { role: "user", content: "x".repeat(400) }
+    ];
+    const anchor = { promptTokens: 5_000, messageCount: 2 };
+    const delta = estimateMessagesTokens(messages.slice(2));
+    // 5000 exact for the first two messages + heuristic only on the new tail.
+    expect(estimateAnchoredTokens(messages, anchor)).toBe(5_000 + delta);
+  });
+
+  it("falls back to a full heuristic estimate when there is no anchor", () => {
+    const messages: Message[] = [{ role: "user", content: "hi" }];
+    expect(estimateAnchoredTokens(messages, undefined)).toBe(estimateMessagesTokens(messages));
+  });
+
+  it("falls back when the transcript is shorter than the anchored prefix (post-compaction)", () => {
+    const messages: Message[] = [{ role: "user", content: "hi" }];
+    const staleAnchor = { promptTokens: 9_999, messageCount: 5 };
+    expect(estimateAnchoredTokens(messages, staleAnchor)).toBe(estimateMessagesTokens(messages));
+  });
+});
+
+describe("compaction pipeline (M4.0)", () => {
+  it("runs stages cheapest-first and short-circuits once under target", async () => {
+    const ran: string[] = [];
+    const stage = (name: string): CompactionStage => ({
+      name,
+      run: (msgs) => {
+        ran.push(name);
+        return [...msgs, { role: "user", content: `${name} ran` } as Message];
+      }
+    });
+    const result = await runCompactionPipeline([{ role: "user", content: "x" }], {
+      stages: [stage("L1"), stage("L2"), stage("L3")],
+      // Under target after exactly one stage has run.
+      isUnderTarget: () => ran.length >= 1
+    });
+    expect(result.ranStages).toEqual(["L1"]);
+    expect(ran).toEqual(["L1"]);
+  });
+
+  it("runs nothing when already under target", async () => {
+    const result = await runCompactionPipeline([{ role: "user", content: "x" }], {
+      stages: [
+        {
+          name: "L1",
+          run: () => {
+            throw new Error("stage must not run when already under target");
+          }
+        }
+      ],
+      isUnderTarget: () => true
+    });
+    expect(result.ranStages).toEqual([]);
   });
 });
 

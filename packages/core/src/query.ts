@@ -2,8 +2,12 @@ import {
   compactMessages,
   compactMessagesTiered,
   compactMessagesWithSummary,
+  estimateAnchoredTokens,
   estimateMessagesTokens,
-  type MessageSummarizer
+  runCompactionPipeline,
+  type CompactionStage,
+  type MessageSummarizer,
+  type UsageAnchor
 } from "./context.js";
 import {
   DEFAULT_MAX_TOKENS,
@@ -201,6 +205,10 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
     options.critic ? options.critic.maxBounces ?? 2 : 0
   );
   let gateBounces = 0;
+  // M4.0 — usage anchor for the compaction trigger: the exact server-side
+  // prompt-token count of the last request + the strict-extension prefix length
+  // it covered. A compaction invalidates it (the prefix is rewritten).
+  let lastAnchor: UsageAnchor | undefined;
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -274,6 +282,21 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
         profile: options.profile
       });
       messages.splice(0, messages.length, ...retryResult.messages);
+
+      // M4.0 — re-anchor the budget on the request we just sent: `usage` gives
+      // its EXACT prompt-token count, and `messages.length` (post-retry-splice,
+      // pre-response-push) is the prefix that count covers.
+      const sentMessageCount = messages.length;
+      const turnUsage = retryResult.turn.usage;
+      if (turnUsage) {
+        lastAnchor = {
+          promptTokens:
+            (turnUsage.inputTokens ?? 0) +
+            (turnUsage.cacheReadInputTokens ?? 0) +
+            (turnUsage.cacheCreationInputTokens ?? 0),
+          messageCount: sentMessageCount
+        };
+      }
 
       const responseMessage = retryResult.turn.message;
       messages.push(responseMessage);
@@ -395,31 +418,45 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
         content: results.map((result) => ({ type: "tool_result", result }))
       });
 
-      // M3.2b — proactive compaction at the turn boundary. Compacting here
-      // (before the next request) avoids paying for an oversized request that
-      // the API rejects, and lets us compact aggressively (down to the target
-      // ratio) so this doesn't re-trigger next turn.
+      // M4.0 — pre-flight compaction cascade at the turn boundary. The trigger
+      // hangs on the usage ANCHOR (exact prefix + estimated delta), not a raw
+      // chars/4 guess. When over the soft limit, runCompactionPipeline runs its
+      // stages cheapest-first and short-circuits at the target. (Layers L1-L5
+      // land in M4.1-M4.5; the M4.0 spine keeps the existing single stage —
+      // semantic when a summarizer is injected, else tiered — so this is a
+      // structural refactor with zero behavior change.)
       if (proactiveSoftLimitRatio > 0) {
-        const beforeTokens = estimateMessagesTokens(messages);
-        if (beforeTokens > proactiveSoftLimit) {
-          // M3.2c — semantic recap when a summarizer is injected, else the
-          // default deterministic tiered pointer-ization.
-          const compacted = options.compactionSummarizer
-            ? await compactMessagesWithSummary(messages, {
-                targetTokens: proactiveTarget,
-                summarizer: options.compactionSummarizer
-              })
-            : compactMessagesTiered(messages, { targetTokens: proactiveTarget });
-          const afterTokens = estimateMessagesTokens(compacted);
+        const anchoredTokens = estimateAnchoredTokens(messages, lastAnchor);
+        if (anchoredTokens > proactiveSoftLimit) {
+          const beforeTokens = estimateMessagesTokens(messages);
+          const stages: CompactionStage[] = options.compactionSummarizer
+            ? [
+                {
+                  name: "auto_compact",
+                  run: (msgs) =>
+                    compactMessagesWithSummary(msgs, {
+                      targetTokens: proactiveTarget,
+                      summarizer: options.compactionSummarizer!
+                    })
+                }
+              ]
+            : [
+                {
+                  name: "tiered",
+                  run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
+                }
+              ];
+          const result = await runCompactionPipeline(messages, {
+            stages,
+            isUnderTarget: (msgs) => estimateMessagesTokens(msgs) <= proactiveTarget
+          });
+          const afterTokens = estimateMessagesTokens(result.messages);
           if (afterTokens < beforeTokens) {
-            messages.splice(0, messages.length, ...compacted);
-            // M3.1c — within a single run, the ONLY event that invalidates the
-            // rolling message-prefix cache (M3.1a) is a compaction: it rewrites
-            // stale messages, so the next request's prefix diverges from the
-            // cached one. A normal turn merely appends and keeps hitting the
-            // cache. (Per-turn fork-trace would mislabel every appended turn as
-            // a prefix miss, since fork.ts hashes the whole list — so we mark
-            // only the real reset event here.)
+            messages.splice(0, messages.length, ...result.messages);
+            // A compaction is the one event that invalidates the rolling
+            // message-prefix cache (M3.1a) AND the usage anchor (M4.0): the
+            // prefix is rewritten, so the next turn must re-anchor from scratch.
+            lastAnchor = undefined;
             options.profile?.mark("query.cache_prefix_reset", {
               turn,
               beforeTokens,

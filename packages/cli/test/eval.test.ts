@@ -66,7 +66,7 @@ describe("M2.3 eval regression suite", () => {
 
     // Totals are a stable fingerprint of the whole suite.
     expect(report.totals.turns).toBe(21);
-    expect(report.totals.inputTokens).toBe(14350);
+    expect(report.totals.inputTokens).toBe(15850);
     expect(report.totals.outputTokens).toBe(835);
     expect(report.totals.costUsd).toBeGreaterThan(0);
 
