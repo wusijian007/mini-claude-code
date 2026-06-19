@@ -8,6 +8,7 @@ import {
   FakeModel,
   buildTool,
   collectQuery,
+  createProfileRecorder,
   createTaskStore,
   query,
   type ModelClient,
@@ -284,6 +285,49 @@ describe("query loop", () => {
     // The injected summarizer was actually used (semantic path, not the default).
     expect(summarizerCalls).toBeGreaterThanOrEqual(1);
     expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("microcompacts on the cold path and defers on the hot path (M4.3)", async () => {
+    const bigReadTool: ToolDefinition = buildTool({
+      name: "Read",
+      description: "Read returning a large body.",
+      inputSchema: z.object({ path: z.string().min(1) }).strict(),
+      inputJsonSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false
+      },
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      call: () => ({ status: "success", content: "X".repeat(8_000) })
+    });
+
+    async function runWith(now: () => number) {
+      const profile = createProfileRecorder({ runId: "m43-test" });
+      await collectQuery({
+        model: new FakeModel([
+          { type: "tool_use", toolUse: { id: "tu", name: "Read", input: { path: "a.ts" } } },
+          { type: "turn_break" },
+          { type: "assistant_message", content: "done" }
+        ]),
+        initialMessages: [{ role: "user", content: "go" }],
+        tools: [bigReadTool],
+        toolContext: { cwd: process.cwd() },
+        contextBudgetTokens: 1_000,
+        maxTurns: 3,
+        now,
+        profile
+      });
+      return profile.snapshot().checkpoints.some((c) => c.name === "query.microcompact_cold");
+    }
+
+    // Cold: the clock jumps past the TTL between the model call and the boundary.
+    let coldT = 0;
+    expect(await runWith(() => (coldT += 400_000))).toBe(true);
+    // Hot: continuous operation, only a few ms elapse.
+    let hotT = 0;
+    expect(await runWith(() => (hotT += 10))).toBe(false);
   });
 
   it("drives the compaction trigger off the usage anchor, not raw char estimate (M4.0)", async () => {

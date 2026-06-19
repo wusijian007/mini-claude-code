@@ -4,6 +4,7 @@ import {
   compactMessagesWithSummary,
   estimateAnchoredTokens,
   estimateMessagesTokens,
+  microcompactToolResults,
   runCompactionPipeline,
   snipStaleToolScaffolding,
   type CompactionStage,
@@ -76,6 +77,15 @@ export type QueryOptions = {
    * deterministic default path is untouched when this is absent.
    */
   compactionSummarizer?: MessageSummarizer;
+  /**
+   * M4.3 (L3) — cache-warmth clock for the microcompact stage. Returns "now" in
+   * ms; the loop treats the prefix cache as COLD when more than
+   * `microcompactColdMs` (default 5 min ≈ the Anthropic cache TTL) has elapsed
+   * since the last model call, and HOT otherwise. Injectable so offline tests
+   * can drive both paths deterministically. Defaults to `Date.now`.
+   */
+  now?: () => number;
+  microcompactColdMs?: number;
   /**
    * M3.3 — structural verification gate. When set, the agent loop does not
    * complete the moment the model stops calling tools: it first runs
@@ -168,6 +178,10 @@ const DEFAULT_CONTEXT_BUDGET_TOKENS = 24_000;
 // is effectively dormant; the CLI sets a real budget that activates it.
 const DEFAULT_SPILL_THRESHOLD_CHARS = 120_000;
 const DEFAULT_SPILL_PREVIEW_CHARS = 2_048;
+// M4.3 (L3) — treat the prefix cache as cold after ~5 min (the Anthropic cache
+// TTL); keep the 3 newest tool results verbatim when microcompacting.
+const DEFAULT_MICROCOMPACT_COLD_MS = 300_000;
+const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
 const DEFAULT_FINAL_RESPONSE_PROMPT =
   "You are at the final allowed agent turn. Do not call any tools. Provide the best concise final answer from the information already gathered. If something remains unverified, say so briefly instead of continuing to search.";
 const DEFAULT_RETRY_LIMITS: Record<RecoverableModelErrorKind, number> = {
@@ -215,6 +229,11 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
   // prompt-token count of the last request + the strict-extension prefix length
   // it covered. A compaction invalidates it (the prefix is rewritten).
   let lastAnchor: UsageAnchor | undefined;
+  // M4.3 — cache-warmth clock: elapsed time since the last model call decides
+  // the microcompact path (cold rewrite vs hot defer).
+  const now = options.now ?? (() => Date.now());
+  const microcompactColdMs = options.microcompactColdMs ?? DEFAULT_MICROCOMPACT_COLD_MS;
+  let lastModelCallAt: number | undefined;
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -293,6 +312,7 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
       // its EXACT prompt-token count, and `messages.length` (post-retry-splice,
       // pre-response-push) is the prefix that count covers.
       const sentMessageCount = messages.length;
+      lastModelCallAt = now();
       const turnUsage = retryResult.turn.usage;
       if (turnUsage) {
         lastAnchor = {
@@ -450,6 +470,21 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
             name: "snip",
             run: (msgs) => snipStaleToolScaffolding(msgs)
           };
+          // M4.3 (L3) — microcompact, cache-state-driven. COLD (TTL elapsed
+          // since the last call, so the prefix is already gone): clear all but
+          // the newest N tool results — free. HOT (prefix still warm): defer,
+          // to avoid wasting the warm cache (no cache_edits available through
+          // the gateway; see docs/v4-compaction-pipeline-roadmap.md M4.3). Both
+          // paths make zero extra API calls.
+          const cacheWarmth: "cold" | "hot" =
+            lastModelCallAt !== undefined && now() - lastModelCallAt > microcompactColdMs ? "cold" : "hot";
+          const microcompactStage: CompactionStage = {
+            name: "microcompact",
+            run: (msgs) =>
+              cacheWarmth === "cold"
+                ? microcompactToolResults(msgs, { keepRecentToolResults: DEFAULT_KEEP_RECENT_TOOL_RESULTS })
+                : msgs
+          };
           const reclaimStage: CompactionStage = options.compactionSummarizer
             ? {
                 name: "auto_compact",
@@ -463,7 +498,10 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
                 name: "tiered",
                 run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
               };
-          const stages: CompactionStage[] = [spillStage, snipStage, reclaimStage];
+          const stages: CompactionStage[] = [spillStage, snipStage, microcompactStage, reclaimStage];
+          if (cacheWarmth === "cold") {
+            options.profile?.mark("query.microcompact_cold", { turn });
+          }
           const result = await runCompactionPipeline(messages, {
             stages,
             isUnderTarget: (msgs) => estimateMessagesTokens(msgs) <= proactiveTarget
