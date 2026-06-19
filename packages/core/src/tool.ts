@@ -15,6 +15,28 @@ import type {
 import { appendHookWarnings, runToolHooks } from "./hooks.js";
 
 const DEFAULT_MAX_RESULT_SIZE_CHARS = 120_000;
+const DEFAULT_TOOL_RESULT_PREVIEW_CHARS = 2_048;
+
+/**
+ * M4.1 (L1) — a compact head+tail preview of an oversized value. Keeps the
+ * first ~70% and last ~30% of `maxChars` with an omitted-count marker between,
+ * because both the start (what the output is) and the end (the final line /
+ * error / summary) of a large tool output are usually the informative parts —
+ * a pure prefix slice throws the tail away. Returns the value unchanged when it
+ * already fits.
+ */
+export function smartPreview(content: string, maxChars: number): string {
+  if (content.length <= maxChars) {
+    return content;
+  }
+  const head = Math.max(1, Math.floor(maxChars * 0.7));
+  const tail = Math.max(0, maxChars - head);
+  const omitted = content.length - head - tail;
+  if (tail <= 0) {
+    return `${content.slice(0, head)}\n[... ${omitted} chars omitted ...]`;
+  }
+  return `${content.slice(0, head)}\n[... ${omitted} chars omitted ...]\n${content.slice(-tail)}`;
+}
 
 export type BuildToolOptions<TInput extends Record<string, unknown>> = {
   name: string;
@@ -179,29 +201,34 @@ async function budgetToolResult(
     return result;
   }
 
+  // M4.1 — the preview kept inline is decoupled from the spill threshold: a
+  // small head+tail smart preview, not up-to-`maxChars` of pure prefix.
+  const previewChars = Math.min(context.toolResultPreviewChars ?? DEFAULT_TOOL_RESULT_PREVIEW_CHARS, maxChars);
+  const preview = smartPreview(result.content, previewChars);
+
   if (context.artifactDir) {
-    const artifactPath = await writeToolResultArtifact(context.artifactDir, toolUse, result.content);
+    const artifactPath = await writeToolResultArtifact(context.artifactDir, toolUse.name, result.content);
     return {
       ...result,
       artifactPath,
-      content: `${result.content.slice(0, maxChars)}\n[Tool output exceeded ${maxChars} chars. Full output saved to ${artifactPath}]`
+      content: `${preview}\n[Tool output ${result.content.length} chars exceeded budget. Full output saved to ${artifactPath} — use Read to see all of it]`
     };
   }
 
   return {
     ...result,
-    content: `${result.content.slice(0, maxChars)}\n[Tool output clipped at ${maxChars} chars]`
+    content: `${preview}\n[Tool output clipped: ${result.content.length} chars, ${previewChars} kept]`
   };
 }
 
-async function writeToolResultArtifact(
+export async function writeToolResultArtifact(
   artifactDir: string,
-  toolUse: ToolUse,
+  label: string,
   content: string
 ): Promise<string> {
   const absoluteDir = resolve(artifactDir);
   await mkdir(absoluteDir, { recursive: true });
-  const safeName = toolUse.name.replace(/[^A-Za-z0-9_-]/g, "_");
+  const safeName = label.replace(/[^A-Za-z0-9_-]/g, "_");
   const artifactPath = resolve(absoluteDir, `${Date.now()}-${safeName}-${randomUUID().slice(0, 8)}.txt`);
   await writeFile(artifactPath, content, "utf8");
   return artifactPath.replace(/\\/g, "/");

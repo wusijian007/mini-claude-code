@@ -11,9 +11,11 @@ import {
   compactMessagesTiered,
   compactMessagesWithSummary,
   collectQuery,
+  createSpillStage,
   estimateAnchoredTokens,
   estimateMessagesTokens,
   runCompactionPipeline,
+  smartPreview,
   type CompactionStage,
   executeToolUse,
   tokenBudgetFromUsage,
@@ -269,6 +271,69 @@ describe("usage anchor (M4.0)", () => {
   });
 });
 
+describe("smart preview (M4.1)", () => {
+  it("keeps head and tail with an omitted-count marker", () => {
+    const content = `${"H".repeat(60)}${"M".repeat(900)}${"T".repeat(60)}`;
+    const preview = smartPreview(content, 100);
+    expect(preview.length).toBeLessThan(content.length);
+    expect(preview).toContain("chars omitted");
+    expect(preview.startsWith("H")).toBe(true);
+    expect(preview.endsWith("T")).toBe(true);
+  });
+
+  it("returns the value unchanged when it already fits", () => {
+    expect(smartPreview("short", 100)).toBe("short");
+  });
+});
+
+describe("L1 spill stage (M4.1)", () => {
+  it("spills an oversized tool_result to disk and keeps a head+tail preview", async () => {
+    const artifactDir = mkdtempSync(join(tmpdir(), "myagent-spill-stage-"));
+    const stage = createSpillStage({ artifactDir, thresholdChars: 1_000, previewChars: 200 });
+    const messages: Message[] = [
+      { role: "user", content: "root" },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", result: { toolUseId: "t1", status: "success", content: "Z".repeat(5_000) } }]
+      }
+    ];
+
+    const out = await stage.run(messages);
+    const toolMsg = out[1];
+    const block = Array.isArray(toolMsg.content) ? toolMsg.content[0] : undefined;
+    expect(block && block.type === "tool_result").toBe(true);
+    if (block && block.type === "tool_result") {
+      expect(block.result.content.length).toBeLessThan(5_000);
+      expect(block.result.content).toContain("chars omitted");
+      expect(block.result.artifactPath).toBeTruthy();
+      // Full output is restorable from disk (non-destructive).
+      expect(readFileSync(block.result.artifactPath ?? "", "utf8")).toHaveLength(5_000);
+    }
+  });
+
+  it("leaves small results and already-spilled results untouched", async () => {
+    const stage = createSpillStage({ thresholdChars: 1_000, previewChars: 200 });
+    const messages: Message[] = [
+      {
+        role: "tool",
+        content: [{ type: "tool_result", result: { toolUseId: "small", status: "success", content: "tiny" } }]
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool_result",
+            result: { toolUseId: "done", status: "success", content: "Z".repeat(5_000), artifactPath: "/already/spilled.txt" }
+          }
+        ]
+      }
+    ];
+
+    const out = await stage.run(messages);
+    expect(out).toEqual(messages);
+  });
+});
+
 describe("compaction pipeline (M4.0)", () => {
   it("runs stages cheapest-first and short-circuits once under target", async () => {
     const ran: string[] = [];
@@ -328,8 +393,11 @@ describe("tool result budget", () => {
     );
 
     expect(result.status).toBe("success");
-    expect(result.content.length).toBeLessThan(300);
+    // A small preview, not the full 5000 chars (M4.1 head+tail preview + pointer).
+    expect(result.content.length).toBeLessThan(500);
     expect(result.content).toContain("Full output saved");
+    // M4.1 — the preview is head+tail, so it carries the omitted-count marker.
+    expect(result.content).toContain("chars omitted");
     expect(result.artifactPath).toBeTruthy();
     expect(readFileSync(result.artifactPath ?? "", "utf8")).toHaveLength(5_000);
   });
