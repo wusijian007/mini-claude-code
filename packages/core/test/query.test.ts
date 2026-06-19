@@ -296,6 +296,42 @@ describe("query loop", () => {
     expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
   });
 
+  it("drives the compaction trigger off the usage anchor, not raw char estimate (M4.0)", async () => {
+    // A big seeded prefix (an 8K-char whale), but the model reports SMALL usage
+    // for the request that covered it. The anchor trusts the server count, so
+    // the pre-flight cascade does NOT fire even though chars/4 of the full
+    // transcript would blow past the soft limit.
+    const events = await collectQuery({
+      model: new FakeModel([
+        {
+          type: "assistant_message",
+          content: "reading",
+          usage: { inputTokens: 200, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }
+        },
+        { type: "tool_use", toolUse: { id: "tu1", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [
+        { role: "user", content: "root" },
+        { role: "assistant", content: "old turn" },
+        {
+          role: "tool",
+          content: [{ type: "tool_result", result: { toolUseId: "seed", status: "success", content: "Z".repeat(8_000) } }]
+        },
+        { role: "user", content: "go" }
+      ],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      contextBudgetTokens: 1_000,
+      maxTurns: 3
+    });
+
+    // anchored = 200 (exact prefix incl. whale) + small delta < soft limit (750).
+    expect(events.find((e) => e.type === "compaction")).toBeUndefined();
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
   it("does not compact when the transcript stays under the soft limit", async () => {
     const events = await collectQuery({
       model: new FakeModel([

@@ -52,6 +52,63 @@ export function tokenBudgetFromUsage(
   };
 }
 
+export type UsageAnchor = {
+  /** Exact server-side prompt tokens of the last request (input + cache_read + cache_creation). */
+  promptTokens: number;
+  /** Number of messages that were in that request — the strict-extension prefix length. */
+  messageCount: number;
+};
+
+/**
+ * M4.0 — usage-anchored token estimate. The last API usage gives the EXACT
+ * server-side prompt-token count of the prefix that was already sent (system +
+ * tools + the first `messageCount` messages); only the messages appended since
+ * are estimated (chars/4). Error stays small because the bulk — the prefix — is
+ * exact and only the recent delta is guessed (<5% in practice). Falls back to a
+ * full heuristic estimate when there is no anchor, or when the transcript is
+ * shorter than the anchored prefix (e.g. right after a compaction rewrote it).
+ */
+export function estimateAnchoredTokens(
+  messages: readonly Message[],
+  anchor: UsageAnchor | undefined
+): number {
+  if (!anchor || messages.length < anchor.messageCount) {
+    return estimateMessagesTokens(messages);
+  }
+  return anchor.promptTokens + estimateMessagesTokens(messages.slice(anchor.messageCount));
+}
+
+export type CompactionStage = {
+  name: string;
+  run(messages: readonly Message[]): Promise<readonly Message[]> | readonly Message[];
+};
+
+/**
+ * M4.0 — the pre-flight compaction cascade (Claude Code five-layer pipeline;
+ * see docs/v4-compaction-pipeline-roadmap.md). Runs stages cheapest-first and
+ * SHORT-CIRCUITS as soon as the transcript is under target, so an expensive
+ * later layer only acts if the cheaper earlier ones did not free enough. Same
+ * shape as the M3.5 done-gate chain: an ordered list with early exit.
+ */
+export async function runCompactionPipeline(
+  messages: readonly Message[],
+  options: {
+    stages: readonly CompactionStage[];
+    isUnderTarget: (messages: readonly Message[]) => boolean;
+  }
+): Promise<{ messages: Message[]; ranStages: string[] }> {
+  let current: Message[] = [...messages];
+  const ranStages: string[] = [];
+  for (const stage of options.stages) {
+    if (options.isUnderTarget(current)) {
+      break;
+    }
+    current = [...(await stage.run(current))];
+    ranStages.push(stage.name);
+  }
+  return { messages: current, ranStages };
+}
+
 export type TieredCompactOptions = {
   targetTokens?: number;
   /** Messages at the head kept verbatim (the root task). Default 1. */

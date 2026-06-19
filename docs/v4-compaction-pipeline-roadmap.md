@@ -62,7 +62,9 @@ myagent 的模型客户端走**网关,不暴露 Anthropic 的 `cache_edits` beta
 
 ## 各层设计草案 + 设计抉择
 
-### M4.0 — Cascade 骨架 + usage 锚点
+### M4.0 — Cascade 骨架 + usage 锚点 ✅ 已交付
+
+> 已交付：`estimateAnchoredTokens`（上次 usage 精确前缀 + 增量估算）、`UsageAnchor`、`CompactionStage` + `runCompactionPipeline`（cheapest-first 短路）；query 循环触发改挂锚点、压缩后失效锚点；首版 stage 列表 = semantic ? [auto_compact] : [tiered]（零行为回归）；6 个新测试（锚点 3 + 流水线 2 + 锚点驱动触发集成 1）。eval `semantic-compaction` 的脚本化 usage 调成与 seeded 内容一致（2400），证明触发现在尊重服务端 token 数；指纹 in 14350→15850（其余不变）。
 
 **usage 锚点**：上次 API `usage`（`inputTokens + cache_read + cache_creation` = 上次请求的服务端精确 prompt token 数）为基；自上次请求后追加的消息（assistant + tool_results + 注入）是增量,只对增量做 `chars/4` 估算。`anchored ≈ 上次prompt + 增量估算 + 输出预留`。复用/扩展 `tokenBudgetFromUsage`,接进 [query.ts](../packages/core/src/query.ts) 的触发判断。
 **cascade 骨架**：`type CompactionStage = (messages, ctx) => { messages, freedTokens }`；`runCompactionPipeline` 按序跑,每步后用锚点重估,低于目标即短路返回。首版 stage 列表 = `[tiered]`（+ summarizer 存在时 `[semantic]` 末尾）,等价于现状。被动 `prompt_too_long` 网保留为骨架之下的绝对兜底。

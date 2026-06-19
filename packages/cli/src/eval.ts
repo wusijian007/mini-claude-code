@@ -603,6 +603,10 @@ function createEvalTasks(): EvalTask[] {
       // turns) so the summarize-and-drop path has something to condense. One
       // more tool turn pushes the whale out of the recent window; semantic
       // compaction then replaces the stale region with the fake LLM recap.
+      // The turn-0 usage below reflects this seeded whale (~2.4K prompt tokens),
+      // so the M4.0 usage anchor sees the prefix as genuinely large and the
+      // pre-flight cascade fires — scripted usage must be consistent with seeded
+      // content now that the trigger trusts server-reported token counts.
       initialMessages: [
         { role: "user", content: "Analyze the fixture project end to end." },
         {
@@ -631,7 +635,7 @@ function createEvalTasks(): EvalTask[] {
         {
           type: "assistant_message",
           content: "Reading one more file before summarizing.",
-          usage: usage(900, 30, 0, 0)
+          usage: usage(2_400, 30, 0, 0)
         },
         { type: "tool_use", toolUse: { id: "ev_sem_r", name: "Read", input: { path: "README.md" } } },
         { type: "turn_break" },
