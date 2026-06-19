@@ -162,6 +162,70 @@ export function snipStaleToolScaffolding(
   });
 }
 
+export type MicrocompactOptions = {
+  /** Number of newest tool_result blocks kept verbatim; older ones are cleared. Default 3. */
+  keepRecentToolResults?: number;
+  /** Only clear tool_result content longer than this (chars). Default 200. */
+  clearOverChars?: number;
+};
+
+/**
+ * M4.3 (L3) — microcompact: keep the N NEWEST tool_result blocks verbatim and
+ * clear every older one to a marker (count-based, transcript-wide — so it
+ * reaches tool results inside the recent window too, unlike L2's stale-zone
+ * snip). This is the more aggressive deterministic reclaim; the query loop only
+ * applies it on the cache-COLD path (the prefix it rewrites is already expired,
+ * so the rewrite is free), and defers on the cache-HOT path to preserve the
+ * warm prefix. `artifactPath` is preserved so the full output stays restorable.
+ */
+export function microcompactToolResults(
+  messages: readonly Message[],
+  options: MicrocompactOptions = {}
+): Message[] {
+  const keep = Math.max(0, options.keepRecentToolResults ?? 3);
+  const clearOver = options.clearOverChars ?? 200;
+
+  const positions: Array<`${number}:${number}`> = [];
+  messages.forEach((message, mi) => {
+    if (Array.isArray(message.content)) {
+      message.content.forEach((block, bi) => {
+        if (block.type === "tool_result") {
+          positions.push(`${mi}:${bi}`);
+        }
+      });
+    }
+  });
+  const clearCount = Math.max(0, positions.length - keep);
+  const clearSet = new Set(positions.slice(0, clearCount));
+
+  return messages.map((message, mi) => {
+    if (!Array.isArray(message.content)) {
+      return message;
+    }
+    let changed = false;
+    const blocks = message.content.map((block, bi) => {
+      if (
+        block.type === "tool_result" &&
+        clearSet.has(`${mi}:${bi}`) &&
+        block.result.content.length > clearOver
+      ) {
+        changed = true;
+        return {
+          ...block,
+          result: {
+            ...block.result,
+            content: `[cleared tool result: ${block.result.content.length} chars${
+              block.result.artifactPath ? ` -> ${block.result.artifactPath}` : ""
+            }]`
+          }
+        };
+      }
+      return block;
+    });
+    return changed ? { ...message, content: blocks as MessageContent } : message;
+  });
+}
+
 export type TieredCompactOptions = {
   targetTokens?: number;
   /** Messages at the head kept verbatim (the root task). Default 1. */

@@ -84,7 +84,9 @@ myagent 的模型客户端走**网关,不暴露 Anthropic 的 `cache_edits` beta
 确定性丢弃**近期窗口外**的陈旧脚手架（旧 tool_use/result 对、冗长旧 assistant 文本）,保根任务 + 近期窗口逐字,保 tool 配对。向预算上报释放量。零成本。
 **抉择**：snip 只动窗口外；缓存稳定（只在缓存冷时改写前缀,见不变式 1，与 L3 共用冷暖判断）。
 
-### M4.3 — L3 微压缩双路径（核心）
+### M4.3 — L3 微压缩双路径（核心） ✅ 已交付
+
+> 已交付：`microcompactToolResults`（保留最近 N 个 tool_result、其余清成 `[cleared ...]`、count-based 全转录、保留 artifactPath）接为 cascade `[spill, snip, microcompact, reclaim]`。冷热由 `QueryOptions.now` 注入时钟判定（距上次调用 > `microcompactColdMs` 默认 5min → 冷）：**冷**就地清旧、**热**推迟(原生缓存保护,无 cache_edits)。连续运行 = 热 → L3 休眠(eval 指纹不变);冷在 idle/resume 触发,profile mark `query.microcompact_cold`。3 个新测试(microcompact 单测 2 + 冷热决策集成 1，注入时钟 + profile 断言)。**诚实标注**:连续运行恒热是"无 cache_edits"的忠实后果(已记入关键约束)。
 
 "保留最近 N 个工具结果",更旧的清成 `[cleared: <tool>(...) -> <artifact>]`。
 - **冷**（距上次调用 > ~5min,可注入时钟）：就地改写 → 免费。

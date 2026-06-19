@@ -14,6 +14,7 @@ import {
   createSpillStage,
   estimateAnchoredTokens,
   estimateMessagesTokens,
+  microcompactToolResults,
   runCompactionPipeline,
   smartPreview,
   snipStaleToolScaffolding,
@@ -402,6 +403,52 @@ describe("L2 snip stale scaffolding (M4.2)", () => {
     const out = snipStaleToolScaffolding(messages, { rootMessages: 1, recentWindowMessages: 2 });
     const block = Array.isArray(out[1].content) ? out[1].content[0] : undefined;
     expect(block && block.type === "tool_result" ? block.result.content : "").toContain("/spilled/x.txt");
+  });
+});
+
+describe("L3 microcompact (M4.3)", () => {
+  function toolMsg(id: string, content: string, artifactPath?: string): Message {
+    return {
+      role: "tool",
+      content: [
+        {
+          type: "tool_result",
+          result: { toolUseId: id, status: "success", content, ...(artifactPath ? { artifactPath } : {}) }
+        }
+      ]
+    };
+  }
+  function resultContent(message: Message): string {
+    const block = Array.isArray(message.content) ? message.content[0] : undefined;
+    return block && block.type === "tool_result" ? block.result.content : "";
+  }
+
+  it("keeps the newest N tool_results and clears all older ones (preserving artifactPath)", () => {
+    const messages: Message[] = [
+      { role: "user", content: "root" },
+      toolMsg("t1", "A".repeat(2_000), "/spill/t1.txt"),
+      toolMsg("t2", "B".repeat(2_000)),
+      toolMsg("t3", "C".repeat(2_000)),
+      toolMsg("t4", "D".repeat(2_000))
+    ];
+    const out = microcompactToolResults(messages, { keepRecentToolResults: 2 });
+
+    // Older two cleared to markers; the spilled one keeps its artifact pointer.
+    expect(resultContent(out[1])).toContain("cleared tool result");
+    expect(resultContent(out[1])).toContain("/spill/t1.txt");
+    expect(resultContent(out[2])).toContain("cleared tool result");
+    // Newest two kept verbatim.
+    expect(resultContent(out[3])).toBe("C".repeat(2_000));
+    expect(resultContent(out[4])).toBe("D".repeat(2_000));
+    expect(estimateMessagesTokens(out)).toBeLessThan(estimateMessagesTokens(messages));
+  });
+
+  it("clears nothing when there are at most N tool_results", () => {
+    const messages: Message[] = [
+      { role: "user", content: "root" },
+      toolMsg("t", "X".repeat(2_000))
+    ];
+    expect(microcompactToolResults(messages, { keepRecentToolResults: 3 })).toEqual(messages);
   });
 });
 
