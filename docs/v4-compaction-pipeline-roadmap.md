@@ -70,7 +70,9 @@ myagent 的模型客户端走**网关,不暴露 Anthropic 的 `cache_edits` beta
 **cascade 骨架**：`type CompactionStage = (messages, ctx) => { messages, freedTokens }`；`runCompactionPipeline` 按序跑,每步后用锚点重估,低于目标即短路返回。首版 stage 列表 = `[tiered]`（+ summarizer 存在时 `[semantic]` 末尾）,等价于现状。被动 `prompt_too_long` 网保留为骨架之下的绝对兜底。
 **抉择**：① 触发挂 usage 锚点,不挂纯启发式。② 骨架首版零行为回归（现有 proactive/semantic eval 任务原样绿）。③ cascade 与 gate-chain 同构（stage 列表 + 短路 + 可注入）。
 
-### M4.1 — L1 溢出转存（cascade 一层）
+### M4.1 — L1 溢出转存（cascade 一层） ✅ 已交付
+
+> 已交付：`smartPreview`（头 70%+尾 30%+省略标记）、`ToolContext.toolResultPreviewChars`（默认 2048，与溢出阈值解耦）；执行期 `budgetToolResult` 改用智能预览；请求期 `createSpillStage`（cascade 最便宜一层，转存超阈值且未转存的 tool_result，保留 artifactPath、`Read` 可取回）接为流水线首 stage。阈值默认 = 执行预算（eval 预算未设→120K→L1 在 eval 中休眠，指纹不变；CLI 设 8192→生效）。6 个新测试（smartPreview 2 + spill stage 2 + 既有预算测试加固头尾标记 + 锚点驱动已在 M4.0）。
 
 把现有执行期落盘**也**表达为 cascade 的最便宜一层（请求前对超阈值的 tool_result 做转存兜底）；预览改为**头+尾 2KB 智能预览**（非纯前缀切片）；阈值可配（默认评估 8K→更大）；上报释放量。`Read` 取回不变（零损失）。
 **抉择**：保留执行期落盘（早转存早省）；cascade 层是"请求前再兜一次 + 智能预览"的补充,不重复转存（已转存的跳过）。

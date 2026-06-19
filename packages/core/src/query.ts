@@ -21,7 +21,7 @@ import {
   type SystemTextBlock
 } from "./model.js";
 import { executeToolBatch, partitionToolCalls } from "./scheduler.js";
-import { toModelToolDefinition } from "./tool.js";
+import { smartPreview, toModelToolDefinition, writeToolResultArtifact } from "./tool.js";
 import { createSpawnExecutor } from "./executor.js";
 import { isTerminalTaskState, type TaskRecord, type TaskStore } from "./task.js";
 import type { ProfileRecorder } from "./profile.js";
@@ -162,6 +162,11 @@ const CRITIC_SYSTEM_PROMPT =
 
 const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_CONTEXT_BUDGET_TOKENS = 24_000;
+// M4.1 (L1) — request-time spill defaults. The threshold matches the execution
+// budget default, so when no tool/CLI budget is set (e.g. the eval harness) L1
+// is effectively dormant; the CLI sets a real budget that activates it.
+const DEFAULT_SPILL_THRESHOLD_CHARS = 120_000;
+const DEFAULT_SPILL_PREVIEW_CHARS = 2_048;
 const DEFAULT_FINAL_RESPONSE_PROMPT =
   "You are at the final allowed agent turn. Do not call any tools. Provide the best concise final answer from the information already gathered. If something remains unverified, say so briefly instead of continuing to search.";
 const DEFAULT_RETRY_LIMITS: Record<RecoverableModelErrorKind, number> = {
@@ -429,23 +434,29 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
         const anchoredTokens = estimateAnchoredTokens(messages, lastAnchor);
         if (anchoredTokens > proactiveSoftLimit) {
           const beforeTokens = estimateMessagesTokens(messages);
-          const stages: CompactionStage[] = options.compactionSummarizer
-            ? [
-                {
-                  name: "auto_compact",
-                  run: (msgs) =>
-                    compactMessagesWithSummary(msgs, {
-                      targetTokens: proactiveTarget,
-                      summarizer: options.compactionSummarizer!
-                    })
-                }
-              ]
-            : [
-                {
-                  name: "tiered",
-                  run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
-                }
-              ];
+          // M4.1 (L1) — the cheapest stage: spill any oversized, not-yet-spilled
+          // tool_result to disk and keep only a head+tail preview (non-destructive,
+          // Read restores). Runs first; if it frees enough the deeper layers are
+          // short-circuited.
+          const spillStage = createSpillStage({
+            artifactDir: toolContext.artifactDir,
+            thresholdChars: toolContext.toolResultBudgetChars ?? DEFAULT_SPILL_THRESHOLD_CHARS,
+            previewChars: toolContext.toolResultPreviewChars ?? DEFAULT_SPILL_PREVIEW_CHARS
+          });
+          const reclaimStage: CompactionStage = options.compactionSummarizer
+            ? {
+                name: "auto_compact",
+                run: (msgs) =>
+                  compactMessagesWithSummary(msgs, {
+                    targetTokens: proactiveTarget,
+                    summarizer: options.compactionSummarizer!
+                  })
+              }
+            : {
+                name: "tiered",
+                run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
+              };
+          const stages: CompactionStage[] = [spillStage, reclaimStage];
           const result = await runCompactionPipeline(messages, {
             stages,
             isUnderTarget: (msgs) => estimateMessagesTokens(msgs) <= proactiveTarget
@@ -624,6 +635,72 @@ function reflectiveVerifyFailure(
     "",
     "Locate the cause and fix it. I will re-run the same verification after your next changes."
   ].join("\n");
+}
+
+/**
+ * M4.1 (L1) — the cheapest compaction stage: spill oversized, not-yet-spilled
+ * `tool_result` blocks to disk and keep only a head+tail preview + pointer
+ * (non-destructive; `Read` restores). Skips results already backed by an
+ * artifact (their preview is already small) and those under the threshold.
+ * When no `artifactDir` is available it clips head+tail inline (lossy, rare).
+ */
+export function createSpillStage(opts: {
+  artifactDir?: string;
+  thresholdChars: number;
+  previewChars: number;
+}): CompactionStage {
+  const keep = Math.min(opts.previewChars, opts.thresholdChars);
+  return {
+    name: "spill",
+    async run(messages) {
+      const out: Message[] = [];
+      for (const message of messages) {
+        if (!Array.isArray(message.content)) {
+          out.push(message);
+          continue;
+        }
+        let changed = false;
+        const blocks: typeof message.content = [];
+        for (const block of message.content) {
+          if (
+            block.type === "tool_result" &&
+            !block.result.artifactPath &&
+            block.result.content.length > opts.thresholdChars
+          ) {
+            changed = true;
+            const preview = smartPreview(block.result.content, keep);
+            if (opts.artifactDir) {
+              const artifactPath = await writeToolResultArtifact(
+                opts.artifactDir,
+                block.result.toolUseId,
+                block.result.content
+              );
+              blocks.push({
+                ...block,
+                result: {
+                  ...block.result,
+                  artifactPath,
+                  content: `${preview}\n[spilled ${block.result.content.length} chars -> ${artifactPath}; use Read to restore]`
+                }
+              });
+            } else {
+              blocks.push({
+                ...block,
+                result: {
+                  ...block.result,
+                  content: `${preview}\n[clipped ${block.result.content.length} chars]`
+                }
+              });
+            }
+          } else {
+            blocks.push(block);
+          }
+        }
+        out.push(changed ? { ...message, content: blocks } : message);
+      }
+      return out;
+    }
+  };
 }
 
 /**

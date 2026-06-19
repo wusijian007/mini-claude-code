@@ -73,6 +73,12 @@ export type ToolContext = {
   abortSignal?: AbortSignal;
   artifactDir?: string;
   toolResultBudgetChars?: number;
+  /**
+   * M4.1 (L1) — chars kept inline as a head+tail preview when a tool result is
+   * spilled to an artifact. Decoupled from the spill threshold
+   * (`toolResultBudgetChars`). Default 2048.
+   */
+  toolResultPreviewChars?: number;
   profile?: ProfileRecorder;
   requestPermission?: (request: PermissionRequest) => Promise<PermissionDecision> | PermissionDecision;
   hookSnapshot?: HookSnapshot;
