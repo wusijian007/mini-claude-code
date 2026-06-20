@@ -223,7 +223,7 @@ export type TerminalStateEvent = {
 
 export type CompactionEvent = {
   type: "compaction";
-  reason: "proactive" | "reactive";
+  reason: "proactive" | "reactive" | "collapse";
   beforeTokens: number;
   afterTokens: number;
   turn: number;

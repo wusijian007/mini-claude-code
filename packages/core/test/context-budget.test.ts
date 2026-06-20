@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   ModelError,
   buildTool,
+  collapseMessagesView,
   compactMessages,
   compactMessagesTiered,
   compactMessagesWithSummary,
@@ -449,6 +450,40 @@ describe("L3 microcompact (M4.3)", () => {
       toolMsg("t", "X".repeat(2_000))
     ];
     expect(microcompactToolResults(messages, { keepRecentToolResults: 3 })).toEqual(messages);
+  });
+});
+
+describe("L4 collapse view (M4.4)", () => {
+  it("returns a reversible collapsed view WITHOUT mutating the input", () => {
+    const messages: Message[] = [
+      { role: "user", content: "root task" },
+      { role: "assistant", content: "stale reasoning one" },
+      { role: "user", content: "stale question" },
+      { role: "assistant", content: "stale reasoning two" },
+      { role: "user", content: "recent a" },
+      { role: "assistant", content: "recent b" }
+    ];
+    const snapshot = JSON.parse(JSON.stringify(messages));
+
+    const view = collapseMessagesView(messages, { rootMessages: 1, recentWindowMessages: 2 });
+
+    // The canonical input is untouched — that is the reversibility guarantee.
+    expect(messages).toEqual(snapshot);
+    // The view is root + a collapse marker + the recent window.
+    expect(view[0].content).toBe("root task");
+    expect(String(view[1].content)).toContain("context collapsed");
+    expect(view[view.length - 1].content).toBe("recent b");
+    expect(view[view.length - 2].content).toBe("recent a");
+    // Fewer messages than canonical (stale region collapsed to one marker).
+    expect(view.length).toBeLessThan(messages.length);
+  });
+
+  it("returns the messages unchanged when there is no stale region", () => {
+    const small: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "yo" }
+    ];
+    expect(collapseMessagesView(small, { rootMessages: 1, recentWindowMessages: 6 })).toEqual(small);
   });
 });
 
