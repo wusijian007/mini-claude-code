@@ -94,7 +94,10 @@ myagent 的模型客户端走**网关,不暴露 Anthropic 的 `cache_edits` beta
 - 两路零额外 API 调用。
 **抉择**：① 冷暖靠注入时钟的"距上次调用耗时",非真 TTL。② 热路径用原生缓存保护（无 `cache_edits`,见关键约束）。③ 留 `cacheEditsCapable` seam 供未来真 cache_edits 接入。
 
-### M4.4 — L4 上下文 collapse（可逆视图叠加）
+### M4.4 — L4 上下文 collapse（可逆视图叠加） ✅ 已交付
+
+> 已交付：`collapseMessagesView`（纯函数,陈旧区→一条确定性 collapse 标记,根任务+近期窗口保留,**不改输入**,recent 边界 snap 过 leading tool_result）。`QueryOptions.contextCollapse`（opt-in,默认关）+ `collapseSoftLimitRatio`（默认 0.9,高于 cascade 的 0.75）+ CLI `--context-collapse`。请求装配期发**视图**、canonical `messages` 不被 splice 覆盖（可逆）；**sticky** 一旦触发；**压制整条破坏性 cascade(含 L5 语义)**——collapse 是可逆替代,胜过不可逆 auto-compact(L4>L5 互斥)。`compaction` 事件 reason `"collapse"` + mark `query.collapse_active`。默认关 → 零行为回归。3 个新测试(collapseMessagesView 可逆性+无陈旧区 no-op + 集成:高阈值激活、发 collapse 事件、L5 被压制、canonical 不变)。
+> **诚实标注**:这是本轨道最具侵入性的一项——真正分离了"stored messages（canonical）"与"sent view（collapse 视图）",并在 collapse 模式下跳过 splice 回写以保 canonical 完整。
 
 ~90% 满时,在**请求装配期**生成一个"折叠视图"：摘要叠加在原文之上,**原文保留在 stored transcript**,可 rollback（丢弃叠加层即恢复）。分离"存储的 messages"与"发出去的 view"。**collapse 生效 → 压制 L5**（图中红色互斥线：collapse ~90% > auto-compact ~87%,后者会毁掉前者要保的细粒度上下文）。
 **抉择**：① collapse 是**视图变换**,非破坏性改写（可回滚）。② 与 L5 互斥,collapse 优先。③ 复用 myagent 已有的 transcript/artifact 分离。

@@ -89,7 +89,7 @@ Usage:
   myagent --version
   myagent --help
   myagent chat <prompt>
-  myagent agent [--permission-mode <plan|default|bypassPermissions>] [--skill <name>] [--verify "<command>"] [--critic [--critic-instructions "<text>"]] [--semantic-compaction] <prompt>
+  myagent agent [--permission-mode <plan|default|bypassPermissions>] [--skill <name>] [--verify "<command>"] [--critic [--critic-instructions "<text>"]] [--semantic-compaction] [--context-collapse] <prompt>
   myagent tui
   myagent memory <path|list|save>
   myagent skill <list|show>
@@ -111,6 +111,7 @@ Week 18 scope:
   agent --verify "<command>" runs a verification gate when the model finishes: on non-zero exit the failure is fed back for a bounded edit->test->fix loop.
   agent --critic adds a read-only Finalize Critic that judges the final answer (the second Definition-of-Done gate after --verify): on REJECT the critique is fed back for a bounded revise loop.
   agent --semantic-compaction makes proactive compaction summarize stale turns with an LLM recap (opt-in) instead of the default deterministic pointer-ization.
+  agent --context-collapse (L4) switches to a reversible collapsed VIEW above ~90% full (canonical history kept intact) and suppresses the destructive cascade, instead of compacting in place.
   agent reserves its final turn for a concise answer instead of stopping cold at max_turns.
   tui starts an interactive terminal session with history, slash commands, permissions, and Ctrl+C.
   memory save <taxonomy> <content> writes long-term memory under .myagent/projects/<project>/memory.
@@ -1291,7 +1292,8 @@ async function runAgent(
     skillNames: parsedArgs.skillNames,
     verify: parseVerifyConfig(parsedArgs.verifyCommand),
     critic: parseCriticConfig(parsedArgs),
-    semanticCompaction: parsedArgs.semanticCompaction
+    semanticCompaction: parsedArgs.semanticCompaction,
+    contextCollapse: parsedArgs.contextCollapse
   });
   return result.exitCode;
 }
@@ -1750,6 +1752,7 @@ type RunAgentTurnOptions = {
   verify?: VerifyConfig;
   critic?: CriticConfig;
   semanticCompaction?: boolean;
+  contextCollapse?: boolean;
   requestPermission?: (request: PermissionRequest) => Promise<PermissionDecision> | PermissionDecision;
   profile?: ProfileRecorder;
 };
@@ -1867,6 +1870,7 @@ async function runAgentTurn(options: RunAgentTurnOptions): Promise<AgentTurnResu
       verify: options.verify,
       critic: options.critic,
       compactionSummarizer,
+      contextCollapse: options.contextCollapse,
       drainBackgroundTasks: true,
       profile
     })) {
@@ -2132,6 +2136,7 @@ type ParsedAgentArgs =
       critic: boolean;
       criticInstructions?: string;
       semanticCompaction: boolean;
+      contextCollapse: boolean;
     }
   | {
       ok: false;
@@ -2146,6 +2151,7 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
   let critic = false;
   let criticInstructions: string | undefined;
   let semanticCompaction = false;
+  let contextCollapse = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -2167,6 +2173,11 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
 
     if (arg === "--semantic-compaction") {
       semanticCompaction = true;
+      continue;
+    }
+
+    if (arg === "--context-collapse") {
+      contextCollapse = true;
       continue;
     }
 
@@ -2218,7 +2229,8 @@ function parseAgentArgs(args: readonly string[]): ParsedAgentArgs {
     verifyCommand,
     critic,
     criticInstructions,
-    semanticCompaction
+    semanticCompaction,
+    contextCollapse
   };
 }
 

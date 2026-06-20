@@ -287,6 +287,54 @@ describe("query loop", () => {
     expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
   });
 
+  it("collapses to a reversible view and suppresses L5 at the high threshold (M4.4)", async () => {
+    let summarizerCalls = 0;
+    const profile = createProfileRecorder({ runId: "m44-test" });
+    const seeded: Message[] = [
+      { role: "user", content: "root task" },
+      { role: "assistant", content: "stale 1" },
+      { role: "user", content: "stale 2" },
+      { role: "assistant", content: "stale 3" },
+      { role: "user", content: "stale 4" },
+      { role: "assistant", content: "stale 5" },
+      { role: "user", content: "stale 6" },
+      { role: "assistant", content: "stale 7" },
+      { role: "user", content: "recent q" },
+      { role: "assistant", content: "recent a" }
+    ];
+    const events = await collectQuery({
+      model: new FakeModel([
+        // usage(1900) puts the anchor above the 90% collapse threshold (1800).
+        {
+          type: "assistant_message",
+          content: "reading",
+          usage: { inputTokens: 1900, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }
+        },
+        { type: "tool_use", toolUse: { id: "tu", name: "Read", input: { path: "a.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: seeded,
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      contextBudgetTokens: 2_000,
+      contextCollapse: true,
+      compactionSummarizer: async () => {
+        summarizerCalls += 1;
+        return "RECAP";
+      },
+      maxTurns: 4,
+      profile
+    });
+
+    // Collapse activated (reversible view), emitting a `collapse` compaction event.
+    expect(events.find((e) => e.type === "compaction" && e.reason === "collapse")).toBeDefined();
+    expect(profile.snapshot().checkpoints.some((c) => c.name === "query.collapse_active")).toBe(true);
+    // L5 (semantic recap) is suppressed by collapse — the summarizer never runs.
+    expect(summarizerCalls).toBe(0);
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
   it("microcompacts on the cold path and defers on the hot path (M4.3)", async () => {
     const bigReadTool: ToolDefinition = buildTool({
       name: "Read",

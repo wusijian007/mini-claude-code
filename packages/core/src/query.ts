@@ -1,4 +1,5 @@
 import {
+  collapseMessagesView,
   compactMessages,
   compactMessagesTiered,
   compactMessagesWithSummary,
@@ -86,6 +87,16 @@ export type QueryOptions = {
    */
   now?: () => number;
   microcompactColdMs?: number;
+  /**
+   * M4.4 (L4) — opt-in context collapse. When enabled and the anchored estimate
+   * crosses `collapseSoftLimitRatio` (default 90%, above the cascade's 75%), the
+   * loop switches to a REVERSIBLE collapsed VIEW: it sends
+   * `collapseMessagesView(messages)` while keeping the canonical `messages`
+   * intact, and SUPPRESSES the destructive cascade (incl. the L5 semantic
+   * recap). Sticky once triggered. Default off → zero behavior change.
+   */
+  contextCollapse?: boolean;
+  collapseSoftLimitRatio?: number;
   /**
    * M3.3 — structural verification gate. When set, the agent loop does not
    * complete the moment the model stops calling tools: it first runs
@@ -182,6 +193,10 @@ const DEFAULT_SPILL_PREVIEW_CHARS = 2_048;
 // TTL); keep the 3 newest tool results verbatim when microcompacting.
 const DEFAULT_MICROCOMPACT_COLD_MS = 300_000;
 const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
+// M4.4 (L4) — collapse triggers above the cascade (90% vs the 75% soft limit)
+// and keeps a slightly larger recent window in the reversible view.
+const DEFAULT_COLLAPSE_SOFT_LIMIT_RATIO = 0.9;
+const DEFAULT_COLLAPSE_RECENT_WINDOW = 8;
 const DEFAULT_FINAL_RESPONSE_PROMPT =
   "You are at the final allowed agent turn. Do not call any tools. Provide the best concise final answer from the information already gathered. If something remains unverified, say so briefly instead of continuing to search.";
 const DEFAULT_RETRY_LIMITS: Record<RecoverableModelErrorKind, number> = {
@@ -234,6 +249,12 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
   const now = options.now ?? (() => Date.now());
   const microcompactColdMs = options.microcompactColdMs ?? DEFAULT_MICROCOMPACT_COLD_MS;
   let lastModelCallAt: number | undefined;
+  // M4.4 — context collapse: once the reversible-view mode is on it stays on
+  // (sticky); the canonical `messages` is never mutated while collapsed.
+  const collapseSoftLimit = Math.floor(
+    contextBudgetTokens * (options.collapseSoftLimitRatio ?? DEFAULT_COLLAPSE_SOFT_LIMIT_RATIO)
+  );
+  let collapseActive = false;
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -270,15 +291,20 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
       const shouldForceFinalResponse = Boolean(options.finalizeBeforeMaxTurns && turn === maxTurns - 1);
+      // M4.4 — when collapsed, SEND the reversible view; the canonical
+      // `messages` stays intact (never spliced over while collapsed).
+      const baseMessages = collapseActive
+        ? collapseMessagesView(messages, { recentWindowMessages: DEFAULT_COLLAPSE_RECENT_WINDOW })
+        : messages;
       const requestMessages = shouldForceFinalResponse
         ? [
-            ...messages,
+            ...baseMessages,
             {
               role: "user",
               content: options.finalResponsePrompt ?? DEFAULT_FINAL_RESPONSE_PROMPT
             } satisfies Message
           ]
-        : messages;
+        : baseMessages;
       const requestTools = shouldForceFinalResponse ? [] : modelTools;
       if (shouldForceFinalResponse) {
         options.profile?.mark("query.final_response_turn", { maxTurns });
@@ -306,11 +332,19 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
         retryLimits,
         profile: options.profile
       });
-      messages.splice(0, messages.length, ...retryResult.messages);
+      // M4.4 — in collapse mode the sent request is the VIEW, not the canonical
+      // history; never splice it back (that would destroy the canonical
+      // messages and the reversibility). When not collapsed this is the normal
+      // retry-compaction write-back.
+      if (!collapseActive) {
+        messages.splice(0, messages.length, ...retryResult.messages);
+      }
 
       // M4.0 — re-anchor the budget on the request we just sent: `usage` gives
       // its EXACT prompt-token count, and `messages.length` (post-retry-splice,
-      // pre-response-push) is the prefix that count covers.
+      // pre-response-push) is the prefix that count covers. (Skipped while
+      // collapsed: the anchor indexes canonical messages, but the view was sent;
+      // collapse is sticky so the anchor is not consulted then anyway.)
       const sentMessageCount = messages.length;
       lastModelCallAt = now();
       const turnUsage = retryResult.turn.usage;
@@ -451,9 +485,21 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
       // land in M4.1-M4.5; the M4.0 spine keeps the existing single stage —
       // semantic when a summarizer is injected, else tiered — so this is a
       // structural refactor with zero behavior change.)
-      if (proactiveSoftLimitRatio > 0) {
-        const anchoredTokens = estimateAnchoredTokens(messages, lastAnchor);
-        if (anchoredTokens > proactiveSoftLimit) {
+      const anchoredTokens = estimateAnchoredTokens(messages, lastAnchor);
+      if (options.contextCollapse && (collapseActive || anchoredTokens >= collapseSoftLimit)) {
+        // M4.4 (L4) — context collapse takes precedence over the destructive
+        // cascade and SUPPRESSES it (incl. the L5 semantic recap): switch to the
+        // reversible view (sent at assembly), keeping canonical messages intact.
+        if (!collapseActive) {
+          collapseActive = true;
+          const beforeTokens = estimateMessagesTokens(messages);
+          const afterTokens = estimateMessagesTokens(
+            collapseMessagesView(messages, { recentWindowMessages: DEFAULT_COLLAPSE_RECENT_WINDOW })
+          );
+          options.profile?.mark("query.collapse_active", { turn, beforeTokens, afterTokens });
+          yield { type: "compaction", reason: "collapse", beforeTokens, afterTokens, turn };
+        }
+      } else if (proactiveSoftLimitRatio > 0 && anchoredTokens > proactiveSoftLimit) {
           const beforeTokens = estimateMessagesTokens(messages);
           // M4.1 (L1) — the cheapest stage: spill any oversized, not-yet-spilled
           // tool_result to disk and keep only a head+tail preview (non-destructive,
@@ -529,7 +575,6 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
               turn
             };
           }
-        }
       }
 
       // M3.4 — turn-boundary task inbox. Drain this-run background tasks that

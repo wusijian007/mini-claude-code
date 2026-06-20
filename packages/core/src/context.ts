@@ -162,6 +162,48 @@ export function snipStaleToolScaffolding(
   });
 }
 
+export type CollapseViewOptions = {
+  /** Messages at the head kept verbatim (the root task). Default 1. */
+  rootMessages?: number;
+  /** Messages at the tail kept verbatim (recent, most-relevant). Default 6. */
+  recentWindowMessages?: number;
+};
+
+/**
+ * M4.4 (L4) — context collapse: a REVERSIBLE VIEW of the transcript. Replaces
+ * the stale region (between root and the recent window) with a single
+ * deterministic collapse marker, keeping the root task + recent window. Unlike
+ * the destructive cascade this does NOT mutate its input — the caller SENDS the
+ * returned view while keeping the canonical `messages` intact, so it is fully
+ * reversible (each turn re-derives the view from the unchanged history; the
+ * originals can always be restored). The recent-window start is snapped past a
+ * leading `tool_result` so no `tool_use` is orphaned in the view.
+ */
+export function collapseMessagesView(
+  messages: readonly Message[],
+  options: CollapseViewOptions = {}
+): Message[] {
+  const root = Math.max(0, options.rootMessages ?? 1);
+  const recent = Math.max(0, options.recentWindowMessages ?? 6);
+  const n = messages.length;
+  let recentStart = Math.max(root, n - recent);
+  while (recentStart > root && messages[recentStart]?.role === "tool") {
+    recentStart -= 1;
+  }
+  const staleSlice = messages.slice(root, recentStart);
+  if (staleSlice.length === 0) {
+    return [...messages];
+  }
+  return [
+    ...messages.slice(0, root),
+    {
+      role: "assistant",
+      content: `[context collapsed: ${staleSlice.length} earlier turn(s) hidden from view; full history retained and restorable]`
+    },
+    ...messages.slice(recentStart)
+  ];
+}
+
 export type MicrocompactOptions = {
   /** Number of newest tool_result blocks kept verbatim; older ones are cleared. Default 3. */
   keepRecentToolResults?: number;
