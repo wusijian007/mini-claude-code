@@ -1,0 +1,80 @@
+<svg viewBox="0 0 900 632" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dT dD">
+<title id="dT">Mini Claude Code — per-turn query loop lifecycle (v4)</title>
+<desc id="dD">Each turn builds a request (a collapsed view when L4 is active), calls the model, and branches on tool use. The tool branch runs the batch then a turn-boundary pre-flight compaction cascade — usage-anchored trigger, five layers L1 spill, L2 snip, L3 microcompact, L4 reversible collapse, L5 guarded auto-compact, cheapest-first with short-circuit — plus a background inbox drain, then loops. The no-tool branch runs the verify-then-critic done-gate chain, ending completed or verification_failed.</desc>
+<style>
+  text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .th { font-size: 14px; font-weight: 500; fill: #2C2C2A; }
+  .ts { font-size: 12px; font-weight: 400; fill: #5F5E5A; }
+  .leader { stroke: #B4B2A9; stroke-width: 0.8; stroke-dasharray: 3 3; fill: none; }
+  .c-gray rect, rect.c-gray, .c-gray polygon { fill: #F1EFE8; stroke: #5F5E5A; }
+  .c-gray .th { fill: #2C2C2A; } .c-gray .ts { fill: #5F5E5A; }
+  .c-purple rect, rect.c-purple { fill: #EEEDFE; stroke: #534AB7; }
+  .c-purple .th { fill: #3C3489; } .c-purple .ts { fill: #534AB7; }
+  .c-green rect, rect.c-green { fill: #E1F5EE; stroke: #0F6E56; }
+  .c-green .th { fill: #085041; } .c-green .ts { fill: #0F6E56; }
+  .c-red rect, rect.c-red { fill: #FAECE7; stroke: #A32D2D; }
+  .c-red .th { fill: #712B13; } .c-red .ts { fill: #A32D2D; }
+  @media (prefers-color-scheme: dark) { .th { fill: #D3D1C7; } .ts { fill: #B4B2A9; } }
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<g class="c-gray"><rect x="92" y="20" width="156" height="32" rx="6"/><text class="th" x="170" y="41" text-anchor="middle">user task / messages</text></g>
+<g class="c-purple"><rect x="66" y="70" width="208" height="50" rx="6"/><text class="th" x="170" y="92" text-anchor="middle">1 · Build request</text><text class="ts" x="170" y="109" text-anchor="middle">breakpoints · collapse view</text></g>
+<g class="c-purple"><rect x="66" y="144" width="208" height="50" rx="6"/><text class="th" x="170" y="166" text-anchor="middle">2 · Model → assistant</text><text class="ts" x="170" y="183" text-anchor="middle">stream · usage anchor</text></g>
+
+<g class="c-gray"><rect x="312" y="144" width="244" height="50" rx="6" stroke-dasharray="4 3"/><text class="th" x="434" y="166" text-anchor="middle">reactive recovery net</text><text class="ts" x="434" y="183" text-anchor="middle">prompt_too_long · max_output</text></g>
+<line class="leader" x1="274" y1="169" x2="310" y2="169"/>
+
+<g class="c-gray"><polygon points="170,220 258,266 170,312 82,266"/><text class="th" x="170" y="263" text-anchor="middle">3 · tool_use?</text><text class="ts" x="170" y="279" text-anchor="middle">called tools?</text></g>
+
+<g class="c-purple"><rect x="312" y="240" width="244" height="50" rx="6"/><text class="th" x="434" y="262" text-anchor="middle">4 · execute batch</text><text class="ts" x="434" y="279" text-anchor="middle">permission · hooks · abort</text></g>
+<g class="c-gray"><rect x="312" y="312" width="244" height="36" rx="6"/><text class="th" x="434" y="335" text-anchor="middle">tool_results</text></g>
+
+<rect x="298" y="372" width="574" height="162" rx="8" fill="none" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="4 3"/>
+<text class="ts" x="312" y="391">turn boundary — usage anchor &gt; 75% of budget?</text>
+<g class="c-green"><rect x="312" y="400" width="104" height="56" rx="6"/><text class="th" x="364" y="424" text-anchor="middle">L1 spill</text><text class="ts" x="364" y="441" text-anchor="middle">disk · preview</text></g>
+<g class="c-green"><rect x="424" y="400" width="104" height="56" rx="6"/><text class="th" x="476" y="424" text-anchor="middle">L2 snip</text><text class="ts" x="476" y="441" text-anchor="middle">stale scaffold</text></g>
+<g class="c-green"><rect x="536" y="400" width="104" height="56" rx="6"/><text class="th" x="588" y="424" text-anchor="middle">L3 micro</text><text class="ts" x="588" y="441" text-anchor="middle">cold / hot</text></g>
+<g class="c-green"><rect x="648" y="400" width="104" height="56" rx="6"/><text class="th" x="700" y="424" text-anchor="middle">L4 collapse</text><text class="ts" x="700" y="441" text-anchor="middle">reversible</text></g>
+<g class="c-red"><rect x="760" y="400" width="102" height="56" rx="6"/><text class="th" x="811" y="424" text-anchor="middle">L5 auto</text><text class="ts" x="811" y="441" text-anchor="middle">breaker · recover</text></g>
+<line x1="416" y1="428" x2="424" y2="428" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="528" y1="428" x2="536" y2="428" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="640" y1="428" x2="648" y2="428" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="752" y1="428" x2="760" y2="428" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<text class="ts" x="312" y="478">cheapest-first · short-circuit when under target</text>
+<text class="ts" x="755" y="478" text-anchor="end">L4 active ⟹ L5 suppressed</text>
+
+<g class="c-purple"><rect x="312" y="546" width="244" height="44" rx="6"/><text class="th" x="434" y="568" text-anchor="middle">background inbox drain</text><text class="ts" x="434" y="584" text-anchor="middle">push finished tasks</text></g>
+
+<rect x="40" y="372" width="252" height="216" rx="8" fill="none" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="4 3"/>
+<text class="ts" x="54" y="391">Definition-of-Done gate chain</text>
+<g class="c-purple"><rect x="64" y="402" width="204" height="48" rx="6"/><text class="th" x="166" y="424" text-anchor="middle">Gate 1 · verify</text><text class="ts" x="166" y="440" text-anchor="middle">executor · exit 0?</text></g>
+<g class="c-purple"><rect x="64" y="466" width="204" height="48" rx="6"/><text class="th" x="166" y="488" text-anchor="middle">Gate 2 · critic</text><text class="ts" x="166" y="504" text-anchor="middle">read-only · APPROVE?</text></g>
+<g class="c-green"><rect x="64" y="528" width="110" height="44" rx="6"/><text class="th" x="119" y="555" text-anchor="middle">completed</text></g>
+<g class="c-red"><rect x="182" y="528" width="110" height="44" rx="6"/><text class="th" x="237" y="549" text-anchor="middle">failed</text><text class="ts" x="237" y="565" text-anchor="middle">budget spent</text></g>
+
+<line x1="170" y1="120" x2="170" y2="142" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="170" y1="52" x2="170" y2="68" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="170" y1="194" x2="170" y2="218" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="258" y1="266" x2="310" y2="266" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<text class="ts" x="284" y="257" text-anchor="middle">yes</text>
+<line x1="434" y1="290" x2="434" y2="312" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="434" y1="348" x2="434" y2="372" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="434" y1="534" x2="434" y2="546" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<polyline points="556,568 884,568 884,95 274,95" fill="none" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<text class="ts" x="600" y="562">↻ next turn</text>
+
+<line x1="170" y1="312" x2="168" y2="400" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<text class="ts" x="150" y="340" text-anchor="middle">no</text>
+<line x1="166" y1="450" x2="166" y2="464" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<text class="ts" x="180" y="461">pass</text>
+<line x1="150" y1="514" x2="124" y2="528" stroke="#888780" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="200" y1="514" x2="232" y2="528" stroke="#888780" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<polyline points="40,486 20,486 20,95 64,95" fill="none" stroke="#888780" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+<text class="ts" x="26" y="360">fail →</text>
+<text class="ts" x="26" y="374">reflect</text>
+
+<rect x="40" y="606" width="12" height="12" rx="3" class="c-green"/><text class="ts" x="58" y="616">zero-cost / reversible layer</text>
+<rect x="250" y="606" width="12" height="12" rx="3" class="c-red"/><text class="ts" x="268" y="616">irreversible last resort / failure</text>
+<rect x="500" y="606" width="12" height="12" rx="3" class="c-purple"/><text class="ts" x="518" y="616">loop step</text>
+</svg>
