@@ -98,6 +98,13 @@ export type QueryOptions = {
   contextCollapse?: boolean;
   collapseSoftLimitRatio?: number;
   /**
+   * M4.5 (L5) — circuit breaker for the semantic auto-compact. After this many
+   * CONSECUTIVE summarizer failures the L5 path is disabled for the rest of the
+   * run (the loop falls back to deterministic compaction), so a flapping
+   * summarizer can never spin forever. Default 3.
+   */
+  maxL5Failures?: number;
+  /**
    * M3.3 — structural verification gate. When set, the agent loop does not
    * complete the moment the model stops calling tools: it first runs
    * `command args` via `toolContext.executor` (NOT the whitelisted Bash
@@ -197,6 +204,10 @@ const DEFAULT_KEEP_RECENT_TOOL_RESULTS = 3;
 // and keeps a slightly larger recent window in the reversible view.
 const DEFAULT_COLLAPSE_SOFT_LIMIT_RATIO = 0.9;
 const DEFAULT_COLLAPSE_RECENT_WINDOW = 8;
+// M4.5 (L5) — open the auto-compact circuit after 3 consecutive failures; carry
+// up to 5 recently touched files into the post-compact recovery note.
+const DEFAULT_MAX_L5_FAILURES = 3;
+const POST_COMPACT_RECOVERY_MAX_FILES = 5;
 const DEFAULT_FINAL_RESPONSE_PROMPT =
   "You are at the final allowed agent turn. Do not call any tools. Provide the best concise final answer from the information already gathered. If something remains unverified, say so briefly instead of continuing to search.";
 const DEFAULT_RETRY_LIMITS: Record<RecoverableModelErrorKind, number> = {
@@ -255,6 +266,11 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
     contextBudgetTokens * (options.collapseSoftLimitRatio ?? DEFAULT_COLLAPSE_SOFT_LIMIT_RATIO)
   );
   let collapseActive = false;
+  // M4.5 — L5 circuit breaker + post-compact recovery state.
+  const maxL5Failures = options.maxL5Failures ?? DEFAULT_MAX_L5_FAILURES;
+  let l5Failures = 0;
+  let l5Disabled = false;
+  let recentFiles: string[] = [];
   const toolContext: ToolContext = {
     ...options.toolContext,
     permissionMode: options.permissionMode ?? options.toolContext.permissionMode,
@@ -369,6 +385,9 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
       };
 
       const toolUses = extractToolUses(responseMessage);
+      // M4.5 — remember files touched by Read/Edit/Write so the post-compact
+      // recovery note can remind the model what it was working on.
+      recentFiles = trackRecentFiles(recentFiles, toolUses, POST_COMPACT_RECOVERY_MAX_FILES);
       if (toolUses.length === 0) {
         // M3.5 — Definition-of-Done gate chain. The model stopping tool calls
         // is "I think I'm done", a natural gate, not "done". Each configured
@@ -531,19 +550,43 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
                 ? microcompactToolResults(msgs, { keepRecentToolResults: DEFAULT_KEEP_RECENT_TOOL_RESULTS })
                 : msgs
           };
-          const reclaimStage: CompactionStage = options.compactionSummarizer
-            ? {
-                name: "auto_compact",
-                run: (msgs) =>
-                  compactMessagesWithSummary(msgs, {
-                    targetTokens: proactiveTarget,
-                    summarizer: options.compactionSummarizer!
-                  })
-              }
-            : {
-                name: "tiered",
-                run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
-              };
+          // M4.5 (L5) — the semantic auto-compact, guarded by a circuit breaker:
+          // a summarizer failure does NOT crash the run; it is caught, counted,
+          // and falls back to deterministic compaction for that turn. After
+          // `maxL5Failures` consecutive failures the L5 path is disabled for the
+          // rest of the run (a flapping summarizer can never spin forever — the
+          // ~250K-call-a-day class of incident).
+          const reclaimStage: CompactionStage =
+            options.compactionSummarizer && !l5Disabled
+              ? {
+                  name: "auto_compact",
+                  run: async (msgs) => {
+                    try {
+                      const out = await compactMessagesWithSummary(msgs, {
+                        targetTokens: proactiveTarget,
+                        summarizer: options.compactionSummarizer!
+                      });
+                      l5Failures = 0;
+                      return out;
+                    } catch (error) {
+                      l5Failures += 1;
+                      options.profile?.mark("query.l5_failure", {
+                        turn,
+                        failures: l5Failures,
+                        error: error instanceof Error ? error.message : String(error)
+                      });
+                      if (l5Failures >= maxL5Failures) {
+                        l5Disabled = true;
+                        options.profile?.mark("query.l5_circuit_open", { turn });
+                      }
+                      return compactMessagesTiered(msgs, { targetTokens: proactiveTarget });
+                    }
+                  }
+                }
+              : {
+                  name: "tiered",
+                  run: (msgs) => compactMessagesTiered(msgs, { targetTokens: proactiveTarget })
+                };
           const stages: CompactionStage[] = [spillStage, snipStage, microcompactStage, reclaimStage];
           if (cacheWarmth === "cold") {
             options.profile?.mark("query.microcompact_cold", { turn });
@@ -574,6 +617,22 @@ export async function* query(options: QueryOptions): AsyncIterable<LoopEvent> {
               afterTokens,
               turn
             };
+            // M4.5 (L5) — post-compact recovery. The semantic recap REPLACES the
+            // stale region, so the model can forget which files it just touched.
+            // Re-inject a recent-files note (append-only, cache-friendly) only
+            // when the auto_compact stage actually ran (the deterministic layers
+            // keep re-readable pointers, so they need no recovery).
+            if (result.ranStages.includes("auto_compact") && recentFiles.length > 0) {
+              options.profile?.mark("query.post_compact_recovery", {
+                turn,
+                fileCount: recentFiles.length,
+                latest: recentFiles[recentFiles.length - 1]
+              });
+              messages.push({
+                role: "user",
+                content: formatPostCompactRecovery(recentFiles)
+              });
+            }
           }
       }
 
@@ -734,6 +793,41 @@ function reflectiveVerifyFailure(
  * artifact (their preview is already small) and those under the threshold.
  * When no `artifactDir` is available it clips head+tail inline (lossy, rare).
  */
+/**
+ * M4.5 — track the most-recently touched files (Read/Edit/Write) for the
+ * post-compact recovery note, most-recent last, deduped, capped at `maxFiles`.
+ */
+function trackRecentFiles(
+  current: readonly string[],
+  toolUses: readonly ToolUse[],
+  maxFiles: number
+): string[] {
+  const result = [...current];
+  for (const toolUse of toolUses) {
+    if (
+      (toolUse.name === "Read" || toolUse.name === "Edit" || toolUse.name === "Write") &&
+      typeof toolUse.input.path === "string" &&
+      toolUse.input.path.length > 0
+    ) {
+      const path = toolUse.input.path;
+      const existing = result.indexOf(path);
+      if (existing !== -1) {
+        result.splice(existing, 1);
+      }
+      result.push(path);
+    }
+  }
+  return result.slice(-maxFiles);
+}
+
+/** M4.5 — the post-compact recovery note re-injected after a semantic auto-compact. */
+export function formatPostCompactRecovery(files: readonly string[]): string {
+  return [
+    `[post-compact recovery] Recently touched files (still on disk): ${files.join(", ")}.`,
+    "Their full contents were summarized out of the context above — re-read any you still need with the Read tool before relying on them."
+  ].join("\n");
+}
+
 export function createSpillStage(opts: {
   artifactDir?: string;
   thresholdChars: number;

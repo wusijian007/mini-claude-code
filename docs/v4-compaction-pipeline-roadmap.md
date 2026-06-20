@@ -1,5 +1,6 @@
 # v4 上下文压缩流水线路线图
 
+> ✅ **全轨道已交付**（M4.0 地基 + L1–L5 全部落地,#24–#30）。五层流水线 + usage 锚点上线,默认行为零回归(opt-in 的 L4/L5 LLM 路径默认关,eval 指纹全程不变)。
 > 锚文档。v1.x/v2/v3 已完成；本轨道把上下文压缩从"单盒子 + 启发式触发"重做成 **Claude Code 风格的五层流水线**：每次调模型前从最便宜到最贵依次跑,前一层省够空间后面就什么都不做,语义压缩作为最后兜底。每个 milestone PR 应引用本文件。
 > 灵感图:`D:\pencil\claudecode-learning\claude_code_five_layer_compaction_pipeline.svg`（Budget / Snip / Microcompact / Context collapse / Auto-compact）。
 
@@ -102,7 +103,9 @@ myagent 的模型客户端走**网关,不暴露 Anthropic 的 `cache_edits` beta
 ~90% 满时,在**请求装配期**生成一个"折叠视图"：摘要叠加在原文之上,**原文保留在 stored transcript**,可 rollback（丢弃叠加层即恢复）。分离"存储的 messages"与"发出去的 view"。**collapse 生效 → 压制 L5**（图中红色互斥线：collapse ~90% > auto-compact ~87%,后者会毁掉前者要保的细粒度上下文）。
 **抉择**：① collapse 是**视图变换**,非破坏性改写（可回滚）。② 与 L5 互斥,collapse 优先。③ 复用 myagent 已有的 transcript/artifact 分离。
 
-### M4.5 — L5 auto-compact 加固（受护栏的最后兜底）
+### M4.5 — L5 auto-compact 加固（受护栏的最后兜底） ✅ 已交付
+
+> 已交付（v4 收官）：① **熔断器**——semantic 摘要失败被 catch、当轮回退确定性压缩;连续 `maxL5Failures`（默认 3）次失败即禁用 L5（marks `query.l5_failure`/`query.l5_circuit_open`),flapping summarizer 永不空转(防约 25 万次/天那类事故)。② **压缩后恢复**——`auto_compact` stage 真正跑过后,append `formatPostCompactRecovery` 注入"最近触碰的文件"(从 Read/Edit/Write 的 tool_use 追踪)的提示,防模型压缩后"忘了刚改的文件"(append-only,mark `query.post_compact_recovery`)。③ **压制**已在 M4.4 落地(collapse 生效则整条 cascade 含 L5 被跳过)。`QueryOptions.maxL5Failures`;helper `formatPostCompactRecovery` 导出。3 个新测试(recovery 格式单测 + 熔断器集成 3 次失败开闸不崩 + 恢复集成 mark 带最近文件名)。**默认框架**:确定性 reclaim 始终在线作最后兜底,LLM auto-compact 仍 opt-in 但已受护栏——"默认兜底开启"在 myagent 即"确定性 tiered 恒为兜底,语义版受护栏 opt-in"。
 
 现有 opt-in 语义 recap 升级为**最后兜底**：fork 子 agent 摘要（myagent 子 agent 机制现成）,CoT `<analysis>`→`<summary>`,只留摘要,不可逆。加两道生产护栏：
 - **熔断器**：连续 3 次失败即停,不无限重试（Anthropic 真出过一天浪费约 25 万次调用的事故）。

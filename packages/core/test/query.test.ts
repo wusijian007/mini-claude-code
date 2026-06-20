@@ -10,6 +10,7 @@ import {
   collectQuery,
   createProfileRecorder,
   createTaskStore,
+  formatPostCompactRecovery,
   query,
   type ModelClient,
   type ToolDefinition
@@ -333,6 +334,104 @@ describe("query loop", () => {
     // L5 (semantic recap) is suppressed by collapse — the summarizer never runs.
     expect(summarizerCalls).toBe(0);
     expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("formats a post-compact recovery note listing the recent files (M4.5)", () => {
+    const note = formatPostCompactRecovery(["src/a.ts", "src/b.ts"]);
+    expect(note).toContain("post-compact recovery");
+    expect(note).toContain("src/a.ts");
+    expect(note).toContain("src/b.ts");
+    expect(note).toContain("Read tool");
+  });
+
+  it("opens the L5 circuit breaker after repeated summarizer failures, without crashing (M4.5)", async () => {
+    const bigReadTool: ToolDefinition = buildTool({
+      name: "Read",
+      description: "Read returning a large body.",
+      inputSchema: z.object({ path: z.string().min(1) }).strict(),
+      inputJsonSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false
+      },
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      call: () => ({ status: "success", content: "X".repeat(8_000) })
+    });
+    const profile = createProfileRecorder({ runId: "m45-breaker" });
+    const events = await collectQuery({
+      model: new FakeModel([
+        { type: "assistant_message", content: "r1", usage: { inputTokens: 900, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+        { type: "tool_use", toolUse: { id: "t1", name: "Read", input: { path: "f1.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "r2", usage: { inputTokens: 900, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+        { type: "tool_use", toolUse: { id: "t2", name: "Read", input: { path: "f2.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "r3", usage: { inputTokens: 900, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+        { type: "tool_use", toolUse: { id: "t3", name: "Read", input: { path: "f3.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      // Seed enough turns that there is always a stale region for the semantic
+      // auto-compact to engage (and thus call the failing summarizer) each turn.
+      initialMessages: [
+        { role: "user", content: "root" },
+        { role: "assistant", content: "a" },
+        { role: "user", content: "b" },
+        { role: "assistant", content: "c" },
+        { role: "user", content: "d" },
+        { role: "assistant", content: "e" },
+        { role: "user", content: "f" },
+        { role: "assistant", content: "g" }
+      ],
+      tools: [bigReadTool],
+      toolContext: { cwd: process.cwd() },
+      contextBudgetTokens: 1_000,
+      compactionSummarizer: async () => {
+        throw new Error("summarizer is down");
+      },
+      maxTurns: 6,
+      profile
+    });
+
+    const checkpoints = profile.snapshot().checkpoints;
+    // The breaker opened after 3 consecutive failures...
+    expect(checkpoints.some((c) => c.name === "query.l5_circuit_open")).toBe(true);
+    // ...and the run survived (failures are caught + fall back to deterministic).
+    expect(events.some((e) => e.type === "terminal_state" && e.state.status === "error")).toBe(false);
+    expect(events.at(-1)).toEqual({ type: "terminal_state", state: { status: "completed" } });
+  });
+
+  it("re-injects a post-compact recovery note after a semantic auto-compact (M4.5)", async () => {
+    const profile = createProfileRecorder({ runId: "m45-recovery" });
+    await collectQuery({
+      model: new FakeModel([
+        { type: "tool_use", toolUse: { id: "tu", name: "Read", input: { path: "src/app.ts" } } },
+        { type: "turn_break" },
+        { type: "assistant_message", content: "done" }
+      ]),
+      initialMessages: [
+        { role: "user", content: "root task" },
+        { role: "assistant", content: `reasoning prose: ${"analysis. ".repeat(900)}` },
+        { role: "user", content: "keep going" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "checkpoint" },
+        { role: "assistant", content: "sure" },
+        { role: "user", content: "now finish" }
+      ],
+      tools: [readTool],
+      toolContext: { cwd: process.cwd() },
+      contextBudgetTokens: 2_000,
+      compactionSummarizer: async () => "RECAP",
+      maxTurns: 4,
+      profile
+    });
+
+    const recovery = profile.snapshot().checkpoints.find((c) => c.name === "query.post_compact_recovery");
+    expect(recovery).toBeDefined();
+    // The note names the file the model just read, so it does not forget it.
+    expect(recovery?.metadata?.latest).toBe("src/app.ts");
   });
 
   it("microcompacts on the cold path and defers on the hot path (M4.3)", async () => {
